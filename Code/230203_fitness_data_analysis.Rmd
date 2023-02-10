@@ -1,0 +1,826 @@
+---
+title: "220307_fitness_data_analysis"
+author: "Kyle Padoock"
+date: "3/7/2022"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+setwd("/Users/PaddockK/Documents/Projects/Cover_crop/cover_crop_git/")
+source('220310_microbe_functions.R')
+```
+
+##Summary
+Soil microbiomes can provide plants with increased pest defenses. They also may alter fitness directly of the insects living in them. Here we have collected fitness data from WCR larvae and corn plants grown in the presence of cover-crop managed soils and traditionally managed soils. First let's look at the data.
+
+
+```{r}
+setwd("..")
+fit.dat <- read_csv("Data/Fitness/210602_fitness_data.csv")
+view(fit.dat)
+```
+
+To start, let's look at dry weight which likely would be most effected by microbial disruption and plant defenses in such a short bioassay.
+
+In a previous analysis, we found that the dry weight residuals do not satisfy the assumptions of normality and were transformed. We square root transformed all values.
+
+
+```{r results = FALSE}
+#Remove uninfested controls
+fit.dat.wcr <- fit.dat %>% dplyr::filter(colony != "CTRL")
+fit.dat.wcr$block <- as.factor(fit.dat.wcr$block)
+
+#Transform dry weight values
+weight.tran <- fit.dat.wcr %>% 
+  dplyr::select(treatment, corn_trait, colony, rep, block, weight_per_larvae) %>% 
+  mutate(sqrt_wt = weight_per_larvae^(1/2)) 
+
+table(weight.tran$treatment, weight.tran$corn_trait, weight.tran$colony)
+```
+```{r}
+##  ANOVA model dry weight ####
+aov.fit.mod.sqrt <- aov(sqrt_wt ~ treatment * corn_trait * colony + block + block*corn_trait + block*colony, data = weight.tran)
+shapiro.test(residuals(aov.fit.mod.sqrt))
+summary(aov.fit.mod.sqrt)
+fit.emm.treat <- emmeans(aov.fit.mod.sqrt, pairwise ~ treatment|colony)
+fit.emm.treat2 <- as.data.frame(emmeans(aov.fit.mod.sqrt, pairwise ~ treatment|colony))
+plot(fit.emm.treat)
+fit.emm.trait <- (emmeans(aov.fit.mod.sqrt, pairwise ~ corn_trait|colony))
+fit.emm.trait2 <- as.data.frame(emmeans(aov.fit.mod.sqrt, pairwise ~ corn_trait|colony))
+plot(fit.emm.trait)
+fit.emm.trait.df <- data.frame(colony = c("Sus", "Sus", "Res", "Res"),
+                               corn_trait = c("Bt", "non-Bt", "Bt", "non-Bt"),
+                               emmean = c(0.149, 0.300, 0.311, 0.339),
+                               se = c(0.0143, 0.0112, 0.0112, 0.0109))
+
+TukeyHSD(aov.fit.mod.sqrt, which = "treatment:colony")
+TukeyHSD(aov.fit.mod.sqrt, which = "treatment:corn_trait:colony")
+
+fit.dat.wcr2 <- fit.dat.wcr %>% group_by(treatment, corn_trait, colony, block) %>% # calculate median values
+  mutate(dw.med = ifelse(weight_per_larvae,median(weight_per_larvae, na.rm=TRUE), ifelse(weight_per_larvae == NA, NA))) 
+fit.dat.wcr2$dat.dw.res<-abs(fit.dat.wcr2$weight_per_larvae-fit.dat.wcr2$dw.med) #calculate residual variance
+levene.dat.aov.dw<-aov(dat.dw.res~treatment*corn_trait*colony*block,fit.dat.wcr2)
+summary(levene.dat.aov.dw)
+TukeyHSD(levene.dat.aov.dw)
+
+fit.dat.wcr3 <- fit.dat.wcr %>% 
+  dplyr::mutate(treatment2 = treatment) %>% 
+  dplyr::mutate(corn2 = corn_trait) %>% 
+  unite(treat_corn, treatment2, corn2, sep = '_')
+
+fit.dat.wcr3 <- fit.dat.wcr3 %>% 
+  dplyr::mutate(corn3 = corn_trait) %>% 
+  dplyr::mutate(colony2 = colony) %>% 
+  unite(corn_colony, corn3, colony2, sep = '_')
+
+weight.tran2 <- fit.dat.wcr3 %>% 
+  dplyr::select(treatment, treat_corn, corn_colony, colony, rep, block, weight_per_larvae) %>% 
+  mutate(sqrt_wt = weight_per_larvae^(1/2)) 
+
+aov.fit.mod.sqrt2 <- aov(sqrt_wt ~ treat_corn * colony + block + block*colony, data = weight.tran2)
+shapiro.test(residuals(aov.fit.mod.sqrt2))
+summary(aov.fit.mod.sqrt2)
+fit.emm.treat_corn <- emmeans(aov.fit.mod.sqrt2, pairwise ~ treat_corn|colony)
+plot(fit.emm.treat_corn)
+
+aov.fit.mod.sqrt3 <- aov(sqrt_wt ~ treatment * corn_colony + block, data = weight.tran2)
+shapiro.test(residuals(aov.fit.mod.sqrt3))
+summary(aov.fit.mod.sqrt3)
+fit.emm.corn_colony <- emmeans(aov.fit.mod.sqrt3, pairwise ~ corn_colony|treatment)
+plot(fit.emm.corn_colony)
+
+```
+
+We see here there is a significant corn type x colony interaction. This is capturing the difference between res and susceptible on Bt. What's interesting is we also see a treatment x colony interaction. To further investigate this, we can separate the colonies and analyze them individually.
+
+```{r}
+fit.dat.wcr.res <- weight.tran %>% 
+  filter(colony == "RES")
+
+aov.fit.mod.res <- aov(sqrt_wt ~ treatment * corn_trait + block + block*corn_trait, data = fit.dat.wcr.res)
+shapiro.test(residuals(aov.fit.mod.res))
+summary(aov.fit.mod.res)
+TukeyHSD(aov.fit.mod.res, which = "treatment")
+TukeyHSD(aov.fit.mod.res, which = "treatment:corn_trait")
+
+fit.dat.wcr.sus <- weight.tran %>% 
+  filter(colony == "SUS")
+
+aov.fit.mod.sus <- aov(sqrt_wt ~ treatment * corn_trait + block + block*corn_trait, data = fit.dat.wcr.sus)
+shapiro.test(residuals(aov.fit.mod.sus))
+summary(aov.fit.mod.sus)
+TukeyHSD(aov.fit.mod.sus, which = "treatment")
+
+```
+Interesting, we find that resistant insects are slightly lighter when grown in traditionally managed soils while susceptible insects do slightly better in cover crop managed. We don't see this in the emmeans test, which is probably the most accurate way to analyze these data. The interaction is due to the resistant insects being effected by the soil treatment but not the susceptible. However, this is probably due to variation in the dry weight from averaging across Bt plants and non-bt plants. Maybe we should treat each combination as a unique group to see how it changes.
+
+```{r}
+# summary of average weight and standard error ####
+sum.weight <- fit.dat.wcr %>% 
+  dplyr::group_by(colony, corn_trait, treatment) %>% 
+  dplyr::summarise(mean_weight = mean(weight_per_larvae, na.rm = TRUE),
+                   sd = std.error(weight_per_larvae, na.rm = TRUE))
+sum.weight$colony <- factor(sum.weight$colony, levels=c("SUS", "RES"))
+
+# generate figure with means, std. error and raw data
+supp.labs <- c("Susceptible", "Resistant")
+names(supp.labs) <- c("SUS", "RES")
+
+# Weight plot violin ####
+weight.plot <- sum.weight %>% 
+  ggplot(aes(x = corn_trait, y = mean_weight, colour= treatment)) +
+  geom_point(position = position_dodge(0.5)) + 
+  scale_color_manual(values = c("#C3BD10", "#137098"), labels = c("Conservation", "Traditional")) +
+  geom_errorbar(aes(ymin=mean_weight-sd, ymax=mean_weight+sd), width=0.07, position = position_dodge(0.5)) +
+  facet_wrap(~colony, scales = "free_y", labeller = labeller(colony = supp.labs))
+
+
+weight.plot + geom_violin(aes(x = corn_trait, y = weight_per_larvae), data = fit.dat.wcr, position = position_dodge(0.5), alpha=0.5) + theme_classic() + xlab("Corn type") +ylab("Larval weight (g)") + labs(color = "Treatment") + 
+  theme(strip.text.x = element_text(size = 20),
+        legend.title = element_text(size = 16),
+        legend.text = element_text(size = 14),
+        axis.title = element_text(size = 16),
+        axis.text = element_text(size = 14)) 
+
+
+ggsave("/Users/PaddockK/Documents/Projects/Cover_crop/cover_crop_git/Data/Fitness/220502_dry_weight.pdf", dpi = 300, width = 9, height = 7)
+ggsave("/Users/PaddockK/Documents/Projects/Cover_crop/cover_crop_git/Data/Fitness/220427_dry_weight.tiff", dpi = 300, width = 9, height = 7)
+
+## Weight plot violin 2 ####
+fit.dat.wcr2 <- fit.dat.wcr%>%
+   mutate(across(colony, factor, levels=c("SUS","RES")))
+fit.dat.wcr2 <- fit.dat.wcr2%>%
+   mutate(across(corn_trait, factor, levels=c("ISO","BT")))
+
+sum.weight <- fit.dat.wcr2 %>% 
+  dplyr::group_by(colony, corn_trait, treatment) %>% 
+  dplyr::summarise(mean_weight = mean(weight_per_larvae, na.rm = TRUE),
+                   sd = std.error(weight_per_larvae, na.rm = TRUE))
+
+weight.plot2 <- 
+  ggplot(aes(x = corn_trait, y = weight_per_larvae, fill= treatment), data = fit.dat.wcr2) +
+  geom_violin() + scale_fill_manual(values = c("#C3BD10", "#137098"), labels = c("Cover crop no-till", "Traditional")) +
+  geom_point(position = position_jitterdodge(dodge.width = 0.9, jitter.width = 0.2), alpha = .5) +
+  geom_boxplot(width=0.1, position = position_dodge(width = .9)) + scale_x_discrete(labels = c("Bt corn", "non-Bt corn")) +
+  facet_wrap(~colony, scales = "fixed",labeller = labeller(colony = supp.labs)) +
+  theme_classic() + xlab("Corn type") +ylab("Average larval weight (g)") + labs(fill = "Treatment") +
+  theme(
+    strip.text.x = element_text(size = 26),
+    legend.title = element_text(size = 24),
+    legend.text = element_text(size = 20),
+    axis.title.x = element_text(size = 24, margin = margin(t = 20)),
+    axis.title.y = element_text(size = 24, margin = margin(r = 20)),
+    axis.text = element_text(size = 20),
+    strip.background = element_rect(fill = "#DEDEDE"))
+
+ggsave("/Users/PaddockK/Documents/Projects/Cover_crop/cover_crop_git/Data/Fitness/221028_dry_weight.pdf", dpi = 300, width = 12, height = 7)
+ggsave("/Users/PaddockK/Documents/Projects/Cover_crop/cover_crop_git/101722ave_larval_weight.pdf", dpi = 300, width = 12, height = 7)
+
+# Weight plot box ####
+weight.plot.box <- 
+  ggplot(aes(x = corn_trait, y = weight_per_larvae, fill= treatment), data = fit.dat.wcr2) +
+  scale_fill_manual(values = c("#C3BD10", "#137098"), labels = c("Cover crop no-till", "Traditional")) +
+  geom_boxplot(width=0.75, position = position_dodge(width = .9)) + scale_x_discrete(labels = c("Bt", "non-Bt ")) +
+  facet_wrap(~colony, scales = "fixed",labeller = labeller(colony = supp.labs)) +
+  theme_classic() + xlab("Corn type") +ylab("Average larval weight (g)") + labs(fill = "Treatment") +
+  theme(
+    strip.text.x = element_text(size = 26),
+    legend.title = element_text(size = 24),
+    legend.text = element_text(size = 20),
+    axis.title.x = element_text(size = 24, margin = margin(t = 20)),
+    axis.title.y = element_text(size = 24, margin = margin(r = 20)),
+    axis.text = element_text(size = 20),
+    strip.background = element_rect(fill = "#DEDEDE"))
+
+ggsave("/Users/PaddockK/Documents/Projects/Cover_crop/cover_crop_git/Data/Fitness/221128_dry_weight_box_flip.pdf", dpi = 300, width = 12, height = 7)
+
+### Weight plot bar ####
+weight.plot.bar <- 
+  ggplot(aes(x = corn_trait, y = mean_weight, fill= treatment), data = sum.weight) +
+  scale_fill_manual(values = c("#C3BD10", "#137098"), labels = c("Cover crop no-till", "Traditional")) +
+  geom_bar(width=0.75, position = position_dodge(width = .9), stat = "identity") + scale_x_discrete(labels = c("Bt", "non-Bt ")) +geom_errorbar(aes(ymin=mean_weight-sd, ymax=mean_weight+sd), width=0.07, position = position_dodge(0.9)) + scale_y_continuous(expand = c(0, 0), limits = c(0, 0.15)) +
+  facet_wrap(~colony, scales = "fixed",labeller = labeller(colony = supp.labs)) +
+  theme_classic() + xlab("Corn type") +ylab("Average larval weight (g)") + labs(fill = "Treatment") +
+  theme(
+    strip.text.x = element_text(size = 26),
+    legend.title = element_text(size = 24),
+    legend.text = element_text(size = 20),
+    axis.title.x = element_text(size = 24, margin = margin(t = 20)),
+    axis.title.y = element_text(size = 24, margin = margin(r = 20)),
+    axis.text = element_text(size = 20),
+    strip.background = element_rect(fill = "#DEDEDE"))
+
+ggsave("/Users/PaddockK/Documents/Projects/Cover_crop/cover_crop_git/Data/Fitness/221212_dry_weight_bar_flip.pdf", dpi = 300, width = 12, height = 7)
+
+
+```
+
+```{r}
+### Weight bar plot interactions ####
+ ## Treatment x colony
+supp.labs <- c("Resistant", "Susceptible")
+names(supp.labs) <- c("RES", "SUS")
+fit.emm.treat3 <- head(fit.emm.treat2, 4)
+fit.emm.treat3$colony <- factor(fit.emm.treat3$colony, levels=c("SUS", "RES"))
+
+weight.plot.bar.tc <-
+  ggplot(aes(x = treatment, y = emmean), data = fit.emm.treat3) +
+  #scale_fill_manual(values = c("#C3BD10", "#137098"), labels = c("Cover crop no-till", "Traditional")) +
+  geom_bar(width=0.5, position = position_dodge(width = .9), stat = "identity") + scale_x_discrete(labels = c("Cover crop no-till", "Traditional")) +geom_errorbar(aes(ymin=emmean-SE, ymax=emmean+SE), width=0.07, position = position_dodge(0.9)) +  scale_y_continuous(expand = c(0, 0), limits = c(0, 0.45)) +
+  facet_wrap(~colony, scales = "fixed",labeller = labeller(colony = supp.labs)) +
+  theme_classic() + xlab("Treatment") + labs(y = expression(paste("Average larval weight (g)\n(square root transformed)"))) + 
+  theme(
+    strip.text.x = element_text(size = 18),
+    axis.title.x = element_text(size = 16, margin = margin(t = 20)),
+    axis.title.y = element_text(size = 16, margin = margin(r = 30)),
+    plot.margin = margin(t = .5, r = 1, b = 1, l = 1.5, "cm"),
+    strip.background = element_rect(fill = "#DEDEDE"))
+weight.plot.bar.tc
+
+### Corn by colony interaction ####
+fit.emm.trait3 <- head(fit.emm.trait2, 4)
+fit.emm.trait3$colony <- factor(fit.emm.trait3$colony, levels=c("SUS", "RES"))
+
+weight.plot.bar.ctc <-
+  ggplot(aes(x = corn_trait, y = emmean), data = fit.emm.trait3) +
+  #scale_fill_manual(values = c("#C3BD10", "#137098"), labels = c("Cover crop no-till", "Traditional")) +
+  geom_bar(width=0.5, position = position_dodge(width = .9), stat = "identity") + scale_x_discrete(labels = c("Bt", "non-Bt")) +geom_errorbar(aes(ymin=emmean-SE, ymax=emmean+SE), width=0.07, position = position_dodge(0.9)) +  scale_y_continuous(expand = c(0, 0), limits = c(0, 0.45)) +
+  facet_wrap(~colony, scales = "fixed",labeller = labeller(colony = supp.labs)) +
+  theme_classic() + xlab("Corn type") + labs(y = expression(paste("Average larval weight (g)\n(square root transformed)"))) + 
+  theme(
+    strip.text.x = element_text(size = 18),
+    axis.title.x = element_text(size = 16, margin = margin(t = 20)),
+    axis.title.y = element_text(size = 16, margin = margin(r = 30)),
+    plot.margin = margin(t = .5, r = 1, b = 1, l = 1.5, "cm"),
+    strip.background = element_rect(fill = "#DEDEDE"))
+weight.plot.bar.ctc
+
+### Individual colony plots ####
+fit.dat.wcr2 <- fit.dat.wcr%>%
+   mutate(across(colony, factor, levels=c("SUS","RES")))
+fit.dat.wcr2 <- fit.dat.wcr2%>%
+   mutate(across(corn_trait, factor, levels=c("BT","ISO")))
+
+
+
+sum.weight <- fit.dat.wcr2 %>% 
+  dplyr::group_by(colony, corn_trait, treatment) %>% 
+  dplyr::summarise(mean_weight = mean(weight_per_larvae, na.rm = TRUE),
+                   sd = std.error(weight_per_larvae, na.rm = TRUE))
+
+sum.weight.sus <- fit.dat.wcr2 %>% filter(colony == "SUS") %>% 
+  dplyr::group_by(treatment, corn_trait) %>% 
+  dplyr::summarise(mean_weight = mean(weight_per_larvae, na.rm = TRUE),
+                   sd = std.error(weight_per_larvae, na.rm = TRUE))
+
+sum.weight.sus.treat <- fit.dat.wcr2 %>% filter(colony == "SUS") %>% 
+  dplyr::group_by(treatment) %>% 
+  dplyr::summarise(mean_weight = mean(weight_per_larvae, na.rm = TRUE),
+                   sd = std.error(weight_per_larvae, na.rm = TRUE))
+
+sum.weight.sus$order_value <- c(1,3.35,1.85,4.2)
+
+
+weight.plot.bar.sus <-
+  ggplot(aes(x = order_value, y = mean_weight, fill = treatment, pattern = corn_trait), data = sum.weight.sus) +
+  scale_fill_manual(values = c("#C3BD10", "#137098"), labels = c("Conservation", "Conventional")) +
+  geom_bar_pattern(width=0.75, position = position_dodge(width = .9), stat = "identity",
+                   color = "black", 
+                   pattern_fill = "black",
+                   pattern_angle = 45,
+                   pattern_density = 0.1,
+                   pattern_spacing = 0.025,
+                   pattern_key_scale_factor = 0.6) + 
+  scale_pattern_manual(values = c(BT = "stripe", ISO = "none"), labels = c("Bt", "non-Bt")) +
+  geom_errorbar(aes(ymin=mean_weight-sd, ymax=mean_weight+sd), width=0.07, position = position_dodge(0.9)) +
+ labs(x = NULL, 
+      y = expression(paste("Average larval weight (g)\n(square root transformed)")), 
+      fill = "Treatment", 
+      pattern = "Corn type") + 
+  guides(pattern = guide_legend(override.aes = list(fill = "white"), order = 2),
+         fill = guide_legend(override.aes = list(pattern = "none"), order = 1)) +
+ scale_y_continuous(expand = c(0, 0), limits = c(0, 0.125)) +
+  #facet_wrap(~colony, scales = "fixed",labeller = labeller(colony = supp.labs)) +
+  #geom_segment(aes(x = 1.575, xend = 3.775, y = 0.118, yend = 0.118), inherit.aes = FALSE) +
+  #  geom_text(aes(x = 2.65, y = 0.1195, label = "***"), inherit.aes = FALSE) +
+  theme_classic() +  ggtitle("Susceptible") +
+  theme(
+    plot.title = element_text(size = 30, vjust = 5, hjust = 0.5),
+    strip.text.x = element_text(size = 26),
+    legend.title = element_text(size = 24),
+    axis.ticks.x = element_blank(),
+    legend.text = element_text(size = 20),
+    axis.title.x = element_text(size = 24, margin = margin(t = 20)),
+    axis.title.y = element_text(size = 24, margin = margin(r = 30)),
+    plot.margin = margin(t = 1, r = 1, b = 1, l = 1.5, "cm"),
+    axis.text.x = element_blank(),
+    axis.text.y = element_text(size = 20),
+    strip.background = element_rect(fill = "#DEDEDE"))
+
+ggsave("/Users/PaddockK/Documents/Projects/Cover_crop/cover_crop_git/Data/Fitness/230203_dry_weight_bar_sus_pattern.pdf", dpi = 300, width = 12, height = 7)
+
+
+
+
+## Resistant insects
+
+sum.weight.res <- fit.dat.wcr2 %>% filter(colony == "RES") %>% 
+  dplyr::group_by(treatment, corn_trait) %>% 
+  dplyr::summarise(mean_weight = mean(weight_per_larvae, na.rm = TRUE),
+                   sd = std.error(weight_per_larvae, na.rm = TRUE))
+
+sum.weight.res.treat <- fit.dat.wcr2 %>% filter(colony == "RES") %>% 
+  dplyr::group_by(treatment) %>% 
+  dplyr::summarise(mean_weight = mean(weight_per_larvae, na.rm = TRUE),
+                   sd = std.error(weight_per_larvae, na.rm = TRUE))
+
+sum.weight.res$order_value <- c(1,1.85,3.35,4.2)
+
+
+weight.plot.bar.res <-
+ ggplot(aes(x = order_value, y = mean_weight, fill = treatment, pattern = corn_trait), data = sum.weight.res) +
+  scale_fill_manual(values = c("#C3BD10", "#137098"), labels = c("Conservation", "Conventional")) +
+ geom_bar_pattern(width=0.75, position = position_dodge(width = .9), stat = "identity",
+                   color = "black", 
+                   pattern_fill = "black",
+                   pattern_angle = 45,
+                   pattern_density = 0.1,
+                   pattern_spacing = 0.025,
+                   pattern_key_scale_factor = 0.6) + 
+  scale_pattern_manual(values = c(BT = "stripe", ISO = "none"), labels = c("Bt", "non-Bt")) +
+ labs(x = NULL, 
+      y = expression(paste("Average larval weight (g)\n(square root transformed)")), 
+      fill = "Treatment", 
+      pattern = "Corn type") + 
+ guides(pattern = guide_legend(override.aes = list(fill = "white"), order = 2),
+         fill = guide_legend(override.aes = list(pattern = "none"), order = 1)) +
+  geom_errorbar(aes(ymin=mean_weight-sd, ymax=mean_weight+sd), width=0.07, position = position_dodge(0.9)) +  
+  scale_y_continuous(expand = c(0, 0), limits = c(0, 0.15), breaks = c(0, 0.05, 0.1, 0.15)) +
+ # geom_segment(aes(x = 1.575, xend = 3.775, y = 0.14, yend = 0.14), inherit.aes = FALSE) +
+  #  geom_text(aes(x = 2.65, y = 0.1415, label = "***"), inherit.aes = FALSE) +
+  theme_classic() + ggtitle("Resistant") +
+  theme(
+    plot.title = element_text(size = 30, vjust = 5, hjust = 0.5),
+    strip.text.x = element_text(size = 26),
+    axis.ticks.x = element_blank(),
+    legend.title = element_text(size = 24),
+    legend.text = element_text(size = 20),
+    axis.title.x = element_text(size = 24, margin = margin(t = 20)),
+    axis.title.y = element_text(size = 24, margin = margin(r = 30)),
+    plot.margin = margin(t = 1, r = 1, b = 1, l = 1.5, "cm"),
+    axis.text.x = element_blank(),
+    axis.text.y = element_text(size = 20),
+    strip.background = element_rect(fill = "#DEDEDE"))
+
+ggsave("/Users/PaddockK/Documents/Projects/Cover_crop/cover_crop_git/Data/Fitness/230203_dry_weight_bar_res_pattern.pdf", dpi = 300, width = 12, height = 7)
+
+
+```
+
+```{r}
+ressus <- plot_grid(weight.plot.bar.sus, weight.plot.bar.res, ncol = 1, align = "v", labels = c("a", "b"), label_size = 20)
+
+testing <- ggdraw(ressus) + 
+  geom_text(
+    data = data.frame(x = 0.468, y = 0.92, label = "***"),
+    aes(x, y, label = label),
+    size = 20/.pt,
+    inherit.aes = FALSE
+  ) +
+  geom_text(
+    data = data.frame(x = 0.468, y = 0.43, label = "*"),
+    aes(x, y, label = label),
+    size = 20/.pt,
+    inherit.aes = FALSE
+  ) +
+    draw_line(
+    x = c(0.325, 0.621),
+    y = c(.91, 0.91),
+    color = "black", size = 1
+  ) +
+    draw_line(
+    x = c(0.325, 0.621),
+    y = c(.42, 0.42),
+    color = "black", size = 1
+  )
+
+
+save_plot(plot = testing, "/Users/PaddockK/Documents/Projects/Cover_crop/cover_crop_git/Figs/230205_res_sus_weight_combined2.pdf", base_width = 10, base_height = 15)
+```
+
+
+Let's look at survival data. 
+
+In previous work, we found no significant difference between using a Poisson vs a negative binomial distribution. However, the model seemed to be overly complex. I think we should investigate other models.
+
+```{r}
+prop.fit.dat <- fit.dat.wcr2 %>% 
+  mutate(prop_surv = larv_surv/6)
+
+# summary of average weight and standard error
+sum.surv <- prop.fit.dat %>% 
+  dplyr::group_by(colony, corn_trait, treatment) %>% 
+  dplyr::summarise(mean_surv = mean(prop_surv, na.rm = TRUE),
+                   sd = std.error(prop_surv, na.rm = TRUE))
+
+sum.surv$corn_trait <- factor(sum.surv$corn_trait, levels = c("BT", "ISO"))
+
+# generate figure with means, std. error and raw data
+
+prop.surv.plot <- sum.surv %>% 
+  ggplot(aes(x = corn_trait, y = mean_surv, colour= treatment)) +
+  geom_point(position = position_dodge(0.5)) + 
+  geom_errorbar(aes(ymin=mean_surv-sd, ymax=mean_surv+sd), width=.2, position = position_dodge(0.5)) +  facet_wrap(~colony)
+prop.surv.plot + geom_point(aes(x = corn_trait, y = prop_surv), data = prop.fit.dat, position = position_dodge(0.5), alpha=0.5)
+
+
+survive.plot.box <- 
+  ggplot(aes(x = corn_trait, y = prop_surv, fill= treatment), data = prop.fit.dat) +
+  scale_fill_manual(values = c("#C3BD10", "#137098"), labels = c("Cover crop no-till", "Traditional")) +
+  geom_boxplot(width=0.75, position = position_dodge(width = .9)) + scale_x_discrete(labels = c("Bt", "non-Bt ")) +
+  facet_wrap(~colony, scales = "fixed",labeller = labeller(colony = supp.labs)) +
+  theme_classic() + xlab("Corn type") +ylab("Proportion larvae surviving") + labs(fill = "Treatment") +
+  theme(
+    strip.text.x = element_text(size = 26),
+    legend.title = element_text(size = 24),
+    legend.text = element_text(size = 20),
+    axis.title.x = element_text(size = 24, margin = margin(t = 20)),
+    axis.title.y = element_text(size = 24, margin = margin(r = 20)),
+    axis.text = element_text(size = 20),
+    strip.background = element_rect(fill = "#DEDEDE"))
+
+ggsave("/Users/PaddockK/Documents/Projects/Cover_crop/cover_crop_git/Data/Fitness/221128_survive_box_flip.pdf", dpi = 300, width = 12, height = 7)
+
+survive.plot.bar <- 
+  ggplot(aes(x = corn_trait, y = mean_surv, fill= treatment), data = sum.surv) +
+  scale_fill_manual(values = c("#C3BD10", "#137098"), labels = c("Cover crop no-till", "Traditional")) +
+  geom_bar(width=0.75, position = position_dodge(width = .9), stat = "identity") + scale_x_discrete(labels = c("Bt", "non-Bt ")) + geom_errorbar(aes(ymin=mean_surv-sd, ymax=mean_surv+sd), width=0.07, position = position_dodge(0.9)) +
+  facet_wrap(~colony, scales = "fixed",labeller = labeller(colony = supp.labs)) + scale_y_continuous(expand = c(0, 0), limits = c(0, 0.8)) +
+  theme_classic() + xlab("Corn type") +ylab("Proportion larvae surviving") + labs(fill = "Treatment") +
+  theme(
+    strip.text.x = element_text(size = 26),
+    legend.title = element_text(size = 24),
+    legend.text = element_text(size = 20),
+    axis.title.x = element_text(size = 24, margin = margin(t = 20)),
+    axis.title.y = element_text(size = 24, margin = margin(r = 20)),
+    axis.text = element_text(size = 20),
+    strip.background = element_rect(fill = "#DEDEDE"))
+
+ggsave("/Users/PaddockK/Documents/Projects/Cover_crop/cover_crop_git/Data/Fitness/221212_survive_bar_flip.pdf", dpi = 300, width = 12, height = 7)
+
+ggplot() + geom_boxplot(aes(x = corn_trait, y = prop_surv, fill= treatment,lower=mean-sd,upper=mean+sd,middle=mean,ymin=mean-3*sd,ymax=mean+3*sd),stat="identity", data = prop.fit.dat)
+```
+
+It looks like there may be some treatment effect. Let's analyze them both ways and see.
+
+```{r}
+## Model for survival
+nlmm.mod.fit <- glmer.nb(larv_surv ~ treatment * corn_trait * colony + (1|block:corn_trait) + (1|block:colony),
+                data = fit.dat.wcr, verbose = TRUE)
+
+summary(nlmm.mod.fit)
+emm <- emmeans(nlmm.mod.fit, ~ treatment*colony*corn_trait)
+emm2 <- as.data.frame(emm)
+emm.cl <- emmeans(nlmm.mod.fit, ~ colony)
+emm.cl2 <- as.data.frame(emm.cl)
+
+emm.plot <- emm2 %>% 
+  ggplot(aes(x = corn_trait, y = emmean, colour= treatment)) +
+  geom_point(position = position_dodge(0.5)) + 
+  geom_errorbar(aes(ymin=asymp.LCL, ymax=asymp.UCL), width=.2, position = position_dodge(0.5)) +  facet_wrap(~colony, scales = "free_y")
+
+emmcl.plot <- emm.cl2 %>% 
+  ggplot(aes(x = colony, y = emmean)) +
+  geom_point(position = position_dodge(0.5)) + 
+  geom_errorbar(aes(ymin=asymp.LCL, ymax=asymp.UCL), width=.2, position = position_dodge(0.5)) 
+
+
+nlmm.mod.fit2 <- glmer(larv_surv ~ treatment * corn_trait * colony + (1|block:corn_trait) + (1|block:colony),
+                      data = fit.dat.wcr, family = poisson)
+
+summary(nlmm.mod.fit2)
+Anova(nlmm.mod.fit2, type = "III")
+surv.fit.emm <- emmeans(nlmm.mod.fit2, pairwise ~ corn_trait|colony)
+
+
+nlmm.mod.fit3 <- glmer(larv_surv ~ treatment * corn_trait * colony + (1|block),
+                      data = fit.dat.wcr, family = poisson)
+Anova(nlmm.mod.fit3, type = "III")
+anova(nlmm.mod.fit3)
+coef(nlmm.mod.fit3)
+
+nlmm.mod.fit4 <- glm(larv_surv ~ treatment * corn_trait * colony,
+                      data = fit.dat.wcr, family = poisson)
+Anova(nlmm.mod.fit4, type = "III")
+coef(nlmm.mod.fit4)
+```
+We find no differences in treatment. However, the mortality data shows that Bt is still effective against susceptible insects in both cases.
+
+We can also check hcw to estimate fitness. Previous analysis found that the residuals are normally distributed.
+
+```{r}
+aov.fit.mod.hcw <- aov(HCW_20 ~ treatment * corn_trait * colony + block + block*colony + block*corn_trait, data = fit.dat.wcr)
+shapiro.test(residuals(aov.fit.mod.hcw))
+summary(aov.fit.mod.hcw)
+
+```
+
+
+Let's look at log response ratios of the dry weight to see if there is a change in the effectiness of Bt in the treatments.
+
+```{r}
+relval.dat <- read_csv("/Users/PaddockK/Documents/Projects/Cover_crop/cover_crop_git/Data/Fitness/220302_relative_fitness.csv")
+
+relval.dat2 <- relval.dat %>%
+  mutate(log_surv = log(rel_larv_surv)) %>% 
+  mutate(log_dw = log(rel_larv_weight)) %>% 
+  mutate(log_hcw = log(rel_hcw))
+ggplot(relval.dat2)+
+  geom_boxplot(aes(x = colony, y = log_dw, color = treatment))+
+  theme_bw()
+aov.fit.mod.reldw <- aov(log_dw ~ treatment * colony + block*treatment, data = relval.dat2)
+summary(aov.fit.mod.reldw)
+
+```
+
+Doesn't matter if we use natural logs of response, we have the same effect. I think it is more intuitive to keep the values as actual numbers rather than explain the the natural log of relative values. Still see that Bt is effective against susceptible insects in cover crop fields.
+
+
+#### Root fitness #####
+Let's look at the root values next.
+
+```{r}
+root.dat <- read_csv('/Users/PaddockK/Documents/Projects/Cover_crop/cover_crop_git/Data/Fitness/21_06_03_control_roots.csv')
+
+root.dat$block <- as.factor(root.dat$block)
+
+root.dat.plot <- root.dat %>% 
+  ggplot(aes(x = treatment, y = per_plant_dw, color = corn_trait)) +
+  geom_point(position = position_dodge(0.5)) +
+  facet_wrap(~corn_trait, scales = "free_y")
+
+aov.mod.root <- aov(per_plant_dw ~ treatment*corn_trait + block + block*corn_trait, data = root.dat)
+shapiro.test(residuals(aov.mod.root))
+summary(aov.mod.root)
+emmeans(aov.mod.root, pairwise ~ corn_trait)
+emmeans(aov.mod.root, pairwise ~ treatment|corn_trait)
+
+
+# summary of average weight and standard error
+sum.root <- root.dat %>% 
+  dplyr::group_by(treatment, corn_trait) %>% 
+  dplyr::summarise(mean_weight = mean(per_plant_dw, na.rm = TRUE),
+                   sd = std.error(per_plant_dw, na.rm = TRUE))
+
+
+root.dat.plot <- sum.root %>% 
+  ggplot(aes(x = corn_trait, y = mean_weight, colour= treatment)) +
+  geom_point(position = position_dodge(0.75), size = 3) + scale_color_manual(values = c("#C3BD10", "#137098"), labels = c("Conservation", "Conventional")) + scale_x_discrete(labels = c("Bt", "non-Bt")) +
+  geom_errorbar(aes(ymin=mean_weight-sd, ymax=mean_weight+sd), width=0.07, position = position_dodge(0.75)) + theme_classic() + xlab("Corn type") +ylab("Root weight (g)") +guides(color= guide_legend(title = "Treatment"))  +
+  theme(axis.title.x = element_text(size = 24, margin = margin(t = 20)),
+        axis.title.y = element_text(size = 24, margin = margin(r = 30)),
+        legend.title = element_text( size = 16),
+        legend.text = element_text(size=14),
+        axis.text = element_text(size = 20))
+
+
+p1 <- root.dat.plot + geom_point(aes(x = corn_trait, y = per_plant_dw), data = root.dat, position = position_jitterdodge(dodge.width = .75, jitter.width = 0.1), alpha=0.5)
+
+ggsave("/Users/PaddockK/Documents/Projects/Cover_crop/cover_crop_git/Data/Fitness/230113_dry_weight_roots.pdf", dpi = 300, width = 10, height = 7)
+
+```
+
+```{r}
+#raw feeding damage analysis
+
+rel.root <- read_csv("/Users/PaddockK/Documents/Projects/Cover_crop/cover_crop_git/Data/Fitness/21_06_03_calculated_fitness_root.csv")
+
+rel.root.sub <- rel.root %>%
+  select(tube, treatment, corn_trait, colony, block, rep, root_dw_per_plant, rel_tr_over_ctrl_dw)
+
+
+# One of the samples had no roots recovered so we'll drop that sample
+rel.root.sub <- filter(rel.root.sub, tube != "32")
+rel.root.sub$root_dw_per_plant <- as.numeric(rel.root.sub$root_dw_per_plant)
+rel.root.sub$rel_tr_over_ctrl_dw <- as.numeric(rel.root.sub$rel_tr_over_ctrl_dw)
+
+# summary of average weight and standard error
+sum.root.weight <- rel.root.sub %>% 
+  dplyr::group_by(colony, corn_trait, treatment) %>% 
+  dplyr::summarise(mean_weight = mean(root_dw_per_plant, na.rm = TRUE),
+                   sd = std.error(root_dw_per_plant, na.rm = TRUE))
+
+treat.root.weight<- sum.root.weight %>% 
+  ggplot(aes(x = colony, y = mean_weight, colour= treatment)) +
+  geom_point(position = position_dodge(0.5)) + scale_color_manual(values = c("#C3BD10", "#137098")) +
+  geom_errorbar(aes(ymin=mean_weight-sd, ymax=mean_weight+sd), width=0.07, position = position_dodge(0.5)) +  facet_wrap(~corn_trait)
+treat.root.weight + geom_violin(aes(x = colony, y = root_dw_per_plant), data = rel.root.sub, position = position_dodge(0.5), alpha=0.5) + theme_bw() + xlab("Corn type") +ylab("Average root weight (g)")
+  
+
+
+
+# summary of average weight and standard error
+sum.root.weight.treat <- rel.root.sub %>% 
+  dplyr::group_by(treatment) %>% 
+  dplyr::summarise(mean_weight = mean(root_dw_per_plant, na.rm = TRUE),
+                   sd = std.error(root_dw_per_plant, na.rm = TRUE))
+
+
+
+
+raw.root.mod <- aov(root_dw_per_plant ~ treatment*corn_trait*colony + block + block*corn_trait + block*colony, data = rel.root.sub)
+shapiro.test(residuals(raw.root.mod))
+summary(raw.root.mod)
+emm.root.raw <- emmeans(raw.root.mod, ~ corn_trait)
+```
+
+
+```{r}
+
+# summary of average weight and standard error
+sum.root.weight.rel <- rel.root.sub %>% 
+  dplyr::group_by(colony, corn_trait, treatment) %>% 
+  dplyr::summarise(mean_weight = mean(rel_tr_over_ctrl_dw, na.rm = TRUE),
+                   sd = std.error(rel_tr_over_ctrl_dw, na.rm = TRUE))
+
+treat.root.weight.rel <- sum.root.weight.rel %>% 
+  ggplot(aes(x = corn_trait, y = mean_weight, colour= treatment)) +
+  geom_point(position = position_dodge(0.5)) + scale_color_manual(values = c("#C3BD10", "#137098")) +
+  geom_errorbar(aes(ymin=mean_weight-sd, ymax=mean_weight+sd), width=0.07, position = position_dodge(0.5)) +  facet_wrap(~colony, scales = "free_y")
+treat.root.weight.rel + geom_violin(aes(x = corn_trait, y = rel_tr_over_ctrl_dw), data = rel.root.sub, position = position_dodge(0.5), alpha=0.5) + theme_bw() + xlab("Corn type") +ylab("Relative root weight (g)")
+
+aov.mod.root.rel <- aov(rel_tr_over_ctrl_dw ~ treatment*colony + block + block*colony, data = rel.root.sub)
+shapiro.test(residuals(aov.mod.root.rel))
+summary(aov.mod.root.rel)
+
+#Transform relative values
+rel.root.sub.trans <- rel.root.sub %>% 
+  mutate(rel_val_log = log(rel_tr_over_ctrl_dw))
+
+sum.root.weight.rellog <- rel.root.sub.trans %>% 
+  dplyr::group_by(colony, corn_trait, treatment) %>% 
+  dplyr::summarise(mean_weight = mean(rel_val_log, na.rm = TRUE),
+                   sd = std.error(rel_val_log, na.rm = TRUE))
+
+aov.mod.root.rel.log <- aov(rel_val_log ~ treatment*colony*corn_trait + block + block*colony + block*corn_trait, data = rel.root.sub.trans)
+shapiro.test(residuals(aov.mod.root.rel.log))
+summary(aov.mod.root.rel.log)
+emmeans(aov.mod.root.rel.log, pairwise ~ treatment)
+
+treat.root.weight.rellog <- sum.root.weight.rellog %>% 
+  ggplot(aes(x = colony, y = mean_weight, colour= treatment)) +
+  geom_point(position = position_dodge(0.5)) + scale_color_manual(values = c("#C3BD10", "#137098"),  labels = c("Cover crop no-till", "Traditional")) + 
+  geom_errorbar(aes(ymin=mean_weight-sd, ymax=mean_weight+sd), width=0.07, position = position_dodge(0.5)) +  facet_wrap(~corn_trait) + theme_classic() + xlab("Colony") +ylab("Log Response Ratio (fed/unfed)")
+treat.root.weight.rellog + geom_point(aes(x = colony, y = rel_val_log), data = rel.root.sub.trans, position = position_dodge(.5), alpha=0.5)
+
+# Treatment only
+
+sum.root.weight.rellog2 <- rel.root.sub.trans %>% 
+  dplyr::group_by(treatment) %>% 
+  dplyr::summarise(mean_weight = mean(rel_val_log, na.rm = TRUE),
+                   sd = std.error(rel_val_log, na.rm = TRUE))
+
+treat.root.weight.rellog2 <- sum.root.weight.rellog2 %>% 
+  ggplot(aes(x = treatment, y = mean_weight, colour= treatment)) +
+  geom_point(position = position_dodge(0.5), size = 3) + scale_color_manual(values = c("#C3BD10", "#137098"),  labels = c("Conservation", "Conventional")) + scale_x_discrete(labels = c("Conservation", "Conventional")) +
+  geom_errorbar(aes(ymin=mean_weight-sd, ymax=mean_weight+sd), width=0.07, position = position_dodge(0.5)) + theme_classic()
+treat.root.weight.rellog2 + geom_point(aes(x = treatment, y = rel_val_log), data = rel.root.sub.trans, position = position_jitterdodge(dodge.width = 0.5), alpha=0.5) + 
+  labs(x = "Treatment", y = expression(paste("Log Response Ratio\n       (fed/unfed)"))) +
+  theme(legend.position = "none",
+        axis.text.x = element_text(size = 20),
+        axis.text.y = element_text(size = 20),
+        axis.title.x = element_text(size = 24, margin = margin(t = 20)),
+        axis.title.y = element_text(size = 24, margin = margin(r = 30)),
+        plot.margin = margin(t = 2, r = 1, b = 1, l = 1.5, "cm"))
+
+ggsave("/Users/PaddockK/Documents/Projects/Cover_crop/cover_crop_git/Data/Fitness/230113_LRR_roots_treat.pdf", dpi = 300, width = 10, height = 7)
+
+
+plot_grid(p1, treat.root.weight.rellog2, align = "h", labels = c("a", "b"))
+
+## Because we only see a response by the Bt corn lines, let's see if feeding is different in these treatment groups. Is that easier to explain?
+
+
+# Actually, we can try to subtract the root weight from the controls from the infested plants. That will give us the amount consumed by the insect. This can then tell us if the insects eat more in the presence of certain microbes.
+
+rel.root.sub2 <- rel.root %>%
+  select(tube, treatment, corn_trait, colony, block, rep, root_dw_per_plant, rel_tr_over_ctrl_dw, ctrl_min_trt)
+
+
+
+
+# One of the samples had no roots recovered so we'll drop that sample
+rel.root.sub2 <- filter(rel.root.sub2, tube != "32")
+rel.root.sub2$root_dw_per_plant <- as.numeric(rel.root.sub2$root_dw_per_plant)
+rel.root.sub2$rel_tr_over_ctrl_dw <- as.numeric(rel.root.sub2$rel_tr_over_ctrl_dw)
+rel.root.sub2$ctrl_min_trt <- as.numeric(rel.root.sub2$ctrl_min_trt)
+
+# summary of average weight and standard error
+sum.root.weight.minus <- rel.root.sub2 %>% 
+  dplyr::group_by(colony, corn_trait, treatment) %>% 
+  dplyr::summarise(mean_weight = mean(ctrl_min_trt, na.rm = TRUE),
+                   sd = std.error(ctrl_min_trt, na.rm = TRUE))
+
+treat.root.weight.minus <- sum.root.weight.minus %>% 
+  ggplot(aes(x = corn_trait, y = mean_weight, colour= treatment)) +
+  geom_point(position = position_dodge(0.5)) + scale_color_manual(values = c("#C3BD10", "#137098")) +
+  geom_errorbar(aes(ymin=mean_weight-sd, ymax=mean_weight+sd), width=0.07, position = position_dodge(0.5)) +  facet_wrap(~colony, scales = "free_y") + theme_classic() + xlab("Corn type") +ylab("Average root weight difference due to insect (g)")
+treat.root.weight.minus + geom_violin(aes(x = corn_trait, y = ctrl_min_trt), data = rel.root.sub2, position = position_dodge(0.5), alpha=0.5) + theme_bw() + xlab("Corn type") +ylab("Average root weight difference due to insect (g)") 
+
+aov.mod.root.min <- aov(ctrl_min_trt ~ treatment*colony + block + block*colony, data = rel.root.sub2)
+shapiro.test(residuals(aov.mod.root.min))
+summary(aov.mod.root.min)
+
+```
+
+```{r}
+# use cowplot to combine figures
+
+##### Figure 1
+root.dat.plot <- sum.root %>% 
+  ggplot(aes(x = corn_trait, y = mean_weight, colour= treatment)) +
+  geom_point(position = position_dodge(0.75), size = 3) + scale_color_manual(values = c("#C3BD10", "#137098"), labels = c("Conservation", "Conventional")) + scale_x_discrete(labels = c("Bt", "non-Bt")) +
+  geom_errorbar(aes(ymin=mean_weight-sd, ymax=mean_weight+sd), width=0.07, position = position_dodge(0.75)) + theme_classic() + xlab("Corn type") +ylab("Root weight (g)") +guides(color= guide_legend(title = "Treatment"))  +
+  theme(axis.title.x = element_text(size = 24),
+        axis.title.y = element_text(size = 24),
+        axis.text = element_text(size = 20),
+        plot.margin = margin(6, 0, 6, 0))
+
+
+p1 <- root.dat.plot + geom_point(aes(x = corn_trait, y = per_plant_dw), data = root.dat, position = position_jitterdodge(dodge.width = .75, jitter.width = 0.1), alpha=0.5) + theme(legend.title = element_text( size = 16),
+        legend.text = element_text(size=14), legend.position = "none")
+
+
+#### Figure 2
+treat.root.weight.rellog2 <- sum.root.weight.rellog2 %>% 
+  ggplot(aes(x = treatment, y = mean_weight, colour= treatment)) +
+  geom_point(position = position_dodge(0.5), size = 3) + scale_color_manual(values = c("#C3BD10", "#137098"),  labels = c("Conservation", "Conventional")) + scale_x_discrete(labels = c("Conservation", "Conventional")) +
+  geom_errorbar(aes(ymin=mean_weight-sd, ymax=mean_weight+sd), width=0.07, position = position_dodge(0.5)) +
+  theme_classic() +
+  theme(legend.position = "none",
+        axis.text.x = element_text(size = 20),
+        axis.text.y = element_text(size = 20),
+        axis.title.x = element_text(size = 24),
+        axis.title.y = element_text(size = 24),
+        plot.margin = margin(6, 0, 6, 7))
+p2 <- treat.root.weight.rellog2 + geom_point(aes(x = treatment, y = rel_val_log), data = rel.root.sub.trans, position = position_jitterdodge(dodge.width = 0.5), alpha=0.5) + 
+  labs(x = "Treatment", y = expression(paste("Log Response Ratio\n       (fed/unfed)"))) + theme_classic() +
+  theme(legend.position = "none",
+        axis.text.x = element_text(size = 20),
+        axis.text.y = element_text(size = 20),
+        axis.title.x = element_text(size = 24),
+        axis.title.y = element_text(size = 24),
+        plot.margin = margin(6, 0, 6, 7))
+
+
+## Cowplot
+prow <- plot_grid(p1, NULL, p2, nrow = 1,align = "vh", labels = c("a", "b"), hjust = -1, rel_widths = c(1, 0.15, 1))
+legend <- get_legend(
+  # create some space to the left of the legend
+  p1 + theme(legend.box.margin = margin(0, 0, 0, 12))
+)
+p12 <- plot_grid(prow, legend, rel_widths = c(3, .4))
+
+cowplot::save_plot(plot = p12, "/Users/PaddockK/Documents/Projects/Cover_crop/cover_crop_git/Figs/230203_root_figure.pdf", base_height = 8, base_width = 16)
+```
+
+
+The log response is very hard to interpret and explain. How about we just compare all the raw values together in one figure and model.
+
+```{r}
+root.dat
+rel.root.sub
+rel.root.sub$block <- as.factor(rel.root.sub$block)
+colnames(rel.root.sub)[which(names(rel.root.sub) == "root_dw_per_plant")] <- "per_plant_dw"
+
+full.root <- bind_rows(root.dat, rel.root.sub)
+sum.root.weight.full <- full.root %>% 
+  dplyr::group_by(colony, corn_trait, treatment) %>% 
+  dplyr::summarise(mean_weight = mean(per_plant_dw, na.rm = TRUE),
+                   sd = std.error(per_plant_dw, na.rm = TRUE))
+
+
+full.root.dat.plot <- sum.root.weight.full %>% 
+  ggplot(aes(x = colony, y = mean_weight, colour= treatment)) +
+  geom_point(position = position_dodge(0.75), size = 3) + scale_color_manual(values = c("#C3BD10", "#137098"), labels = c("Cover crop", "Traditional")) + facet_wrap(~corn_trait) +
+  geom_errorbar(aes(ymin=mean_weight-sd, ymax=mean_weight+sd), width=0.07, position = position_dodge(0.75)) + theme_classic() + xlab("Corn type") +ylab("Root weight (g)") +guides(color= guide_legend(title = "Treatment"))  +
+  theme(axis.title.y = element_text(size = 16),
+        axis.title.x = element_text(size = 16),
+        legend.title = element_text( size = 16),
+        legend.text = element_text(size=14),
+        axis.text = element_text(size = 14))
+
+
+full.root.dat.plot + geom_point(aes(x = colony, y = per_plant_dw), data = full.root, position = position_dodge(.75), alpha=0.5)
+
+aov.mod.root.full <- aov(per_plant_dw ~ treatment*colony*corn_trait + block + block*colony + block*corn_trait, data = full.root)
+shapiro.test(residuals(aov.mod.root.full))
+summary(aov.mod.root.full)
+
+emmeans(aov.mod.root.full, pairwise~colony)
+emmeans(aov.mod.root.full, pairwise~corn_trait)
+emmeans(aov.mod.root.full, pairwise~treatment|corn_trait|colony)
+TukeyHSD(aov.mod.root.full)
+```
+
