@@ -1,0 +1,2030 @@
+---
+title: "Analysis for cover crop no-till microbiome project"
+author: "Kyle Padoock"
+date: "11/17/2022"
+output: 
+  html_document:
+    code_folding: "hide"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+setwd("/Users/PaddockK/Documents/Projects/Cover_crop/cover_crop_git/")
+source('Code/220310_microbe_functions.R')
+```
+
+## R Markdown
+
+# Study summary
+
+Soil microbiomes can serve as an intermediary in plant-insect interactions. Here we have collected microbiome data from bulk soil, microbial inoculum, WCR larvae, and corn root rhizosphere grown in the presence of microbes cover crop no-till managed soils and traditionally managed soils. We will pair this with fitness data from WCR larvae feeding assays to see if sustainably managed soils improve pest management through changes in their microbiome.
+
+The experiment was designed as a 2x2x3 factorial design with 2 microbiome types, 2 corn types, and 3 rootworm infestation types. Each sampling location was treated as a block during the bioassay, with each plot serving as a replicate within the block. The two microbiome types are conservative and conventional. The two corn types are Bt and non-Bt corn. The three rootworm infestation types are Bt-susceptible WCR, Bt-resistant WCR, and an uninfested sample.
+
+We begin by establishing a phyloseq object.
+## Object establishment and contaminant removal
+```{r, results = FALSE}
+setwd("/Users/PaddockK/Documents/Projects/Cover_crop/cover_crop_git/Data/Microbiome/Total_set/experimenting/")
+bd <- read_csv2phyloseq(
+  #ASV file with counts of reads per ASV by samples
+  otu.file = "221117unfilt_otu_table.csv", 
+  #Accompanying taxonomy for ASV sequences
+  taxonomy.file = "221117_taxonomy_table.csv",
+  #Metadata table for samples in data set
+  metadata.file = "220901_meta_data.csv"
+)
+
+# Now that it's in a useable format, we can filter out the chloroplast, mitochondria, archaea and unclassified phyla.
+bd2 <- nonbact_filter(bd)
+bd2 <- subset_samples(bd2, Tube != "T266")
+
+```
+We sequenced several extraction blanks to account for any contaminants. We will now use prevalence based filtering method to remove any contaminants from our data set.
+```{r, results = FALSE}
+sample_data(bd2)$is.neg <- sample_data(bd2)$Rep == "Blank"
+contamdf.prev <- isContaminant(bd2, method="prevalence", neg="is.neg")
+table(contamdf.prev$contaminant)
+
+prev_filt <- contamdf.prev %>% 
+  filter(contaminant == TRUE) %>% 
+  rownames_to_column(var = "sample_id") %>% 
+  select(sample_id) %>% 
+  dplyr::pull(sample_id)
+bd.noncontam <- prune_taxa(!contamdf.prev$contaminant, bd2)
+bd3 <- bd.noncontam
+
+```
+The method detected 2 taxa considered contaminants and I have removed those from our data set.
+
+
+## Sample type global effects
+First, I want to see how each sample type differs. That will tell us something about filtering. We can begin by looking at alpha diversity metrics. 
+
+### Alpha Diversity
+Create sample type data set
+```{r results=FALSE}
+### Create sample type data set ###
+bd4 <- subset_samples(bd3, treatment != "CTRL") # Remove control samples
+bd4 <- prune_taxa(taxa_sums(bd4) > 0, bd4) # Remove taxa with no remaining reads
+bd4_wobfree <- subset_taxa(bd4, (Family != "Anaplasmataceae") | is.na(Family)) # Filter Wolbachia out
+sample_bd4_wobfree <- data.frame(sample_data(bd4_wobfree)) # Generate sample data for merging
+
+#rarefaction curves
+bd4_otus = as(otu_table(bd4_wobfree), "matrix")
+bd4_otus <- as.data.frame(bd4_otus)
+
+bd4_otus_meta <- left_join(rownames_to_column(bd4_otus), rownames_to_column(sample_bd4_wobfree), by = 'rowname')
+
+bd4_inext <- iNEXT(bd3_otus, q=0, datatype = "abundance", endpoint = 5000)
+ggiNEXT(bd4_inext,type = 1) + theme(legend.position = "none")
+
+ggsave("/Users/PaddockK/Documents/Projects/Cover_crop/cover_crop_git/Figs/230203_rarefaction_curves_5000.pdf", dpi = 300)
+
+
+### Generate alpha diversity metrics ###
+bd4_div <- estimate_richness(bd4_wobfree, measures = 
+                                       c("Observed", 
+                                        "Chao1", 
+                                        "Shannon", 
+                                        "InvSimpson")) %>% rownames_to_column(var = "sample_id")
+
+
+
+### Combine total alpha diversity metrics with metadata ###
+sample_bd4_wobfree2 <- rownames_to_column(sample_bd4_wobfree, var = "sample_id")
+bd4_div_full <- bd4_div %>% 
+  left_join(sample_bd4_wobfree2, by = "sample_id")
+
+```
+
+#### Analysis of richness
+```{r}
+#### Create a new variable for type treatment interaction ####
+bd4_div_full2 <- bd4_div_full %>% 
+  dplyr::mutate(treatment2 = treatment) %>% 
+  dplyr::mutate(type2 = type) %>% 
+  unite(treat_type, treatment2, type2, sep = '_')
+
+
+#### Check assumptions of ANOVA ####
+
+      ## Verify homoscedasticity ##
+bd4_div2 <- bd4_div_full2 %>% # calculate median values
+  group_by(treatment, type, Block) %>%
+  mutate(Obs.med = ifelse(Observed,median(Observed, na.rm=TRUE), ifelse(Observed == NA, NA))) 
+bd4_div2$dat.med.res<-abs(bd4_div2$Observed-bd4_div2$Obs.med) #calculate residual variance
+levene.dat.aov<-aov(dat.med.res~treatment*type*Block,bd4_div2) #anova of residuals
+summary(levene.dat.aov)
+FittedMeans.type<-emmeans(levene.dat.aov, pairwise~type) #pairwise comparison of signifant values
+plot(FittedMeans.type)
+
+    # Distribution of observed taxa data
+ggplot(bd4_div_full2, aes(x = Observed, fill = treat_type)) + geom_density(alpha = 0.5)
+ggplot(bd4_div_full2, aes(x=Observed)) + 
+  geom_histogram(binwidth=30)
+
+
+#### Model building ####
+obs.aov.mod.full <- aov(Observed ~ treatment * type * Block, data = bd4_div_full)
+shapiro.test(residuals(obs.aov.mod.full))
+summary(obs.aov.mod.full)
+FittedMeans.typetreat.obs<-emmeans(obs.aov.mod.full, ~type*treatment)
+FittedMeans.typetreat.obs2<-emmeans(obs.aov.mod.full, pairwise~type*treatment)
+plot(FittedMeans.typetreat.obs)
+FittedMeans.type.obs<-emmeans(obs.aov.mod.full, ~type)
+plot(FittedMeans.type.obs)
+TukeyHSD(obs.aov.mod.full)
+
+
+#### Plot ####
+
+FittedMeans.typetreat.obs2 <- as.data.frame(FittedMeans.typetreat.obs)
+
+obs_type_plot <- ggplot(FittedMeans.typetreat.obs2, aes(x=type, y = emmean, fill = treatment)) +
+  scale_fill_manual(values=c("#C3BD10", "#137098"), labels = c("Conservative", "Conventional")) +
+  geom_bar(width=0.75, position = position_dodge(width = .9), stat = "identity") +
+  geom_errorbar(aes(ymin=lower.CL, ymax=upper.CL), width=0.07, position = position_dodge(0.9)) +
+  scale_x_discrete(labels = c("Bulk soil", "Inoculum", "Insect", "Rhizosphere")) + 
+  scale_y_continuous(expand = c(0, 0), limits = c(0, 2250)) +
+  labs(fill = "Treatment") + xlab(label = "Sample type") + ylab(label = "Observed species") + 
+  theme_classic() + theme(
+    strip.text.x = element_text(size = 20),
+    legend.title = element_text(size = 18),
+    legend.text = element_text(size = 14),
+    axis.title.x = element_text(size = 18, margin = margin(t = 20)),
+    axis.title.y = element_text(size = 18, margin = margin(r = 20)),
+    axis.text = element_text(size = 14))
+
+obs_type_plot
+#### No inoculum ####
+bd4_div_full_noinoc <- bd4_div_full2 %>% 
+  filter(type != "inoculum")
+
+#### Model building ####
+obs.aov.mod.noinoc <- aov(Observed ~ treatment * type * Block, data = bd4_div_full_noinoc)
+shapiro.test(residuals(obs.aov.mod.noinoc))
+summary(obs.aov.mod.noinoc)
+FittedMeans.typetreat.obs.ni<-emmeans(obs.aov.mod.noinoc, ~type*treatment)
+plot(FittedMeans.typetreat.obs.ni)
+FittedMeans.type.obs.ni<-emmeans(obs.aov.mod.noinoc, ~type)
+plot(FittedMeans.type.obs.ni)
+TukeyHSD(obs.aov.mod.noinoc)
+
+#### Plot ####
+
+FittedMeans.typetreat.obs.ni2 <- as.data.frame(FittedMeans.typetreat.obs.ni)
+FittedMeans.typetreat.obs.ni2$type <- factor(FittedMeans.typetreat.obs.ni2$type, levels=c("bulk_soil", "rhizosphere", "insect"))
+
+obs_type_plot_ni <- ggplot(FittedMeans.typetreat.obs.ni2, aes(x=type, y = emmean, fill = treatment)) +
+  scale_fill_manual(values=c("#C3BD10", "#137098"), labels = c("Cover crop no-till", "Traditional")) +
+  geom_bar(width=0.75, position = position_dodge(width = .9), stat = "identity") +
+  geom_errorbar(aes(ymin=lower.CL, ymax=upper.CL), width=0.07, position = position_dodge(0.9)) +
+  scale_x_discrete(labels = c("Bulk soil", "Rhizosphere", "Insect")) + 
+  scale_y_continuous(expand = c(0, 0), limits = c(0, 2250)) +
+  labs(fill = "Treatment") + xlab(label = "Sample type") + ylab(label = "Observed species") + 
+  theme_classic() + theme(
+    strip.text.x = element_text(size = 20),
+    legend.title = element_text(size = 18),
+    legend.text = element_text(size = 14),
+    axis.title.x = element_text(size = 18, margin = margin(t = 20)),
+    axis.title.y = element_text(size = 18, margin = margin(r = 20)),
+    axis.text = element_text(size = 14))
+```
+What did we find here. Overall, we oberved a significant type by treatment interaction for richness. This interaction is driven by the difference in the rhizosphere richness. Based on 95% CI, we see that cover crop rhizospheres are more rich than traditional rhizospheres, but we see no difference in any other type. In addition, the most rich samples to least rich are soil, rhizosphere, inoculum, and insect. In terms of variance of the sample types, we find a type * treatment interaction. This is due to the difference between CC/TR insect and TR inoculum but not CC inoculum. Overall, the variance was higher for inoculum compared to the rhizosphere and insect, suggesting a signficant effect of host control on microbial richness.
+
+
+#### Analysis of Inverse Simpson's D
+```{r}
+#### Check assumptions of ANOVA ####
+
+  ## Verify homoscedasticity ##
+bd4_div_simp <- bd4_div_full2 %>% # calculate median values
+  group_by(treatment, type, Block) %>% 
+  mutate(Simp.med = ifelse(InvSimpson,median(InvSimpson, na.rm=TRUE), ifelse(InvSimpson == NA, NA))) 
+bd4_div_simp$simp.med.res<-abs(bd4_div_simp$InvSimpson-bd4_div_simp$Simp.med) #calculate residual variance
+
+levene.simp.aov<-aov(simp.med.res~treatment*type*Block,bd4_div_simp) #anova of residuals
+summary(levene.simp.aov)
+FittedMeans.type.simp<-emmeans(levene.simp.aov, ~type) #pairwise comparison of signifant values
+plot(FittedMeans.type.simp)
+
+  ## What is driving the type*treatment*block effect? 
+simp1 <- filter(bd4_div_simp,Block == 1)
+levene.simp.aov1 <- aov(simp.med.res~treatment*type,simp1)
+summary(levene.simp.aov1)
+simp2 <- filter(bd4_div_simp,Block == 2)
+levene.simp.aov2 <- aov(simp.med.res~treatment*type,simp2)
+summary(levene.simp.aov2)
+simp3 <- filter(bd4_div_simp,Block == 3)
+levene.simp.aov3 <- aov(simp.med.res~treatment*type,simp3)
+summary(levene.simp.aov3)
+FittedMeans.type.simp3<-emmeans(levene.simp.aov3, ~type)
+simp4 <- filter(bd4_div_simp,Block == 4)
+levene.simp.aov4 <- aov(simp.med.res~treatment*type,simp4)
+summary(levene.simp.aov4)
+FittedMeans.type.simp4<-emmeans(levene.simp.aov4, ~type*treatment)
+
+
+#### Model building ####
+simp.aov.mod.full <- aov(InvSimpson ~ treatment * type * Block, data = bd4_div_full)
+shapiro.test(residuals(simp.aov.mod.full))
+
+# log transform the response variable due to non-normal residuals
+bd4_div_full_log <- bd4_div_full %>% 
+   mutate(log_invsimp = log10(1+InvSimpson))
+simp.aov.mod.full.log <- aov(log_invsimp ~ treatment * type * Block, data = bd4_div_full_log)
+shapiro.test(residuals(simp.aov.mod.full.log))
+summary(simp.aov.mod.full.log)
+FittedMeans.type.simplog<-emmeans(simp.aov.mod.full.log, ~type*Block)
+plot(FittedMeans.type.simplog)
+FittedMeans.typetreat.simplog<-emmeans(simp.aov.mod.full.log, ~type*treatment)
+FittedMeans.type.simplog<-emmeans(simp.aov.mod.full.log, pairwise~type)
+
+
+  # WIthin block type effects
+simp.aov.mod.full.log1 <- aov(log(1 + InvSimpson) ~ type, data = simp1)
+summary(simp.aov.mod.full.log1)
+simp.aov.mod.full.log2 <- aov(log(1 + InvSimpson) ~ type, data = simp2)
+summary(simp.aov.mod.full.log2)
+simp.aov.mod.full.log3 <- aov(log(1 + InvSimpson) ~ type, data = simp3)
+summary(simp.aov.mod.full.log3)
+simp.aov.mod.full.log4 <- aov(log(1 + InvSimpson) ~ type, data = simp4)
+summary(simp.aov.mod.full.log4)
+FittedMeans.type.simp4log<-emmeans(simp.aov.mod.full.log4, ~type*treatment)
+plot(FittedMeans.type.simp4log)
+
+FittedMeans.type.simplog<-emmeans(simp.aov.mod.full.log, ~type)
+plot(FittedMeans.type.simplog)
+
+
+
+#### Plot ####
+FittedMeans.typetreat.simplog2 <- as.data.frame(FittedMeans.typetreat.simplog)
+
+div_type_plot <- ggplot(FittedMeans.typetreat.simplog2, aes(x=type, y = emmean, fill = treatment)) +
+  scale_fill_manual(values=c("#C3BD10", "#137098"), labels = c("Conservative", "Conventional")) +
+  geom_bar(width=0.75, position = position_dodge(width = .9), stat = "identity") +
+  geom_errorbar(aes(ymin=lower.CL, ymax=upper.CL), width=0.07, position = position_dodge(0.9)) +
+  scale_x_discrete(labels = c("Bulk soil", "Inoculum", "Insect", "Rhizosphere")) + 
+  scale_y_continuous(expand = c(0, 0), limits = c(0, 3)) +
+  labs(fill = "Treatment") + xlab(label = "Sample type") + ylab(label = "Inverse Simpson's D\n (log(1+x))") + 
+  theme_classic() + theme(
+    strip.text.x = element_text(size = 20),
+    legend.title = element_text(size = 18),
+    legend.text = element_text(size = 14),
+    axis.title.x = element_text(size = 18, margin = margin(t = 20)),
+    axis.title.y = element_text(size = 18, margin = margin(r = 20)),
+    axis.text = element_text(size = 14))
+
+div_type_plot
+#### No inoc ####
+#### Model building
+bd4_div_full_noinoc_log <- bd4_div_full_noinoc %>% 
+   mutate(log_invsimp = log10(1+InvSimpson))
+
+simp.aov.mod.noinoc <- aov(log_invsimp ~ treatment * type * Block, data = bd4_div_full_noinoc_log)
+shapiro.test(residuals(simp.aov.mod.noinoc))
+summary(simp.aov.mod.noinoc)
+FittedMeans.typetreat.simp.ni<-emmeans(simp.aov.mod.noinoc, ~type*treatment)
+plot(FittedMeans.typetreat.simp.ni)
+FittedMeans.type.simp.ni<-emmeans(simp.aov.mod.noinoc, ~type)
+plot(FittedMeans.type.simp.ni)
+TukeyHSD(simp.aov.mod.noinoc)
+
+#### Plot ####
+
+FittedMeans.typetreat.simp.ni2 <- as.data.frame(FittedMeans.typetreat.simp.ni)
+FittedMeans.typetreat.simp.ni2$type <- factor(FittedMeans.typetreat.simp.ni2$type, levels=c("bulk_soil", "rhizosphere", "insect"))
+
+simp_type_plot_ni <- ggplot(FittedMeans.typetreat.simp.ni2, aes(x=type, y = emmean, fill = treatment)) +
+  scale_fill_manual(values=c("#C3BD10", "#137098"), labels = c("Cover crop no-till", "Traditional")) +
+  geom_bar(width=0.75, position = position_dodge(width = .9), stat = "identity") +
+  geom_errorbar(aes(ymin=lower.CL, ymax=upper.CL), width=0.07, position = position_dodge(0.9)) +
+  scale_x_discrete(labels = c("Bulk soil", "Rhizosphere", "Insect")) + 
+  scale_y_continuous(expand = c(0, 0), limits = c(0, 3)) +
+  labs(fill = "Treatment") + xlab(label = "Sample type") + ylab(label = "Log Inverse Simpon's D") + 
+  theme_classic() + theme(
+    strip.text.x = element_text(size = 20),
+    legend.title = element_text(size = 18),
+    legend.text = element_text(size = 14),
+    axis.title.x = element_text(size = 18, margin = margin(t = 20)),
+    axis.title.y = element_text(size = 18, margin = margin(r = 20)),
+    axis.text = element_text(size = 14))
+simp_type_plot_ni
+```
+As for Inverse simpson's diversity, we see found a significant type effect. There was a significant block x type interaction but the significance did not vary across blocks for the type effect. Pairwise comparisons were different between blocks for some treatments, likely accounting for the interaction. Soil had the highest diversity and was significantly different from insect and rhizosphere samples. Inoculum was also higher than rhizosphere and insect. Insect was the lowest and significantly less than all three other types. We found variance to have a type x treatment x block effect. This was due to the fact the type x treatment effect was found only in block 4. We observed a main effect of type for variance. This was due to increased variance for the inoculum, liley due to extraction issues. 
+
+
+### Beta diversity
+
+Given the large differences in sample read depth between different types of samples, we will rarify the communities to an even depth of 1300.
+
+```{r}
+### Create data sets ####
+## Rarefy sample depth
+bd4w_rare <- rarefy_even_depth(bd4_wobfree, sample.size = 1300 , rngseed = 2)
+sample_sums(bd4w_rare)
+sample_full <- data.frame(sample_data(bd4w_rare))
+
+#rarefaction curves
+bd4_otus_rare = as(otu_table(bd4w_rare), "matrix")
+bd4_otus_rare <- as.data.frame(bd4_otus_rare)
+
+bd4_otus_meta_rare <- left_join(rownames_to_column(bd4_otus_rare), rownames_to_column(sample_full), by = 'rowname')
+
+bd4_rare_inext <- iNEXT(bd4_otus_rare, q=0, datatype = "abundance", endpoint = 1300)
+ggiNEXT(bd4_rare_inext,type = 1) + theme(legend.position = "none")
+
+ggsave("/Users/PaddockK/Documents/Projects/Cover_crop/cover_crop_git/Figs/230203_rarefaction_curves_1300_rare.pdf", dpi = 300)
+
+## Create distance matrices and sample data
+full_bray <- phyloseq::distance(bd4w_rare, method = "bray")
+full_jaccard <- phyloseq::distance(bd4w_rare, method = "jaccard")
+sample_full <- data.frame(sample_data(bd4w_rare))
+sample_full2 <- sample_full %>% 
+  rownames_to_column(var = "sample") %>% 
+  dplyr::mutate(type2 = type) %>% 
+  dplyr::mutate(treatment2 = treatment) %>% 
+  unite(type_treat, type2, treatment2, sep = '_')
+
+#### Model building ####
+# Type treatment interaction model
+set.seed(2)
+perms <- with(sample_full, how(nperm = 1000, blocks = Block))
+adonis2(full_bray ~ type * treatment, data = sample_full, permutations = perms)
+
+set.seed(2)
+perms <- with(sample_full, how(nperm = 1000, blocks = Block))
+adonis2(full_jaccard ~ type * treatment, data = sample_full, permutations = perms)
+
+pairwise.adonis2(full_bray ~ type_treat, data = sample_full2)
+full_betadisper <- betadisper(full_bray, sample_full2$type_treat)
+boxplot(full_betadisper)
+permutest(full_betadisper)
+TukeyHSD(full_betadisper)
+
+type_betadisper <- betadisper(full_bray, sample_full$type)
+boxplot(type_betadisper)
+permutest(type_betadisper)
+TukeyHSD(type_betadisper)
+
+treat_betadisper <- betadisper(full_bray, sample_full$treatment)
+boxplot(treat_betadisper)
+permutest(treat_betadisper)
+TukeyHSD(treat_betadisper)
+
+
+set.seed(2)
+perms <- with(sample_full, how(nperm = 1000, blocks = type))
+adonis2(full_bray ~ treatment, data = sample_full, permutations = perms)
+treat_betadisper <- betadisper(full_bray, sample_full$treatment)
+
+#### Plot figure ####
+nmds_full <- phyloseq::ordinate(bd4w_rare, "NMDS", "bray")
+nmds_ord_full <- plot_ordination(bd4w_rare, nmds_full, 
+                type = "samples", color = "type", shape = "treatment")
+
+nmds_type_full <- nmds_ord_full + 
+  stat_ellipse(type = "norm", linetype = 2) +
+  stat_ellipse(type = "t") +
+  theme_classic() + labs(colour = "Sample type", shape = "Treatment") + scale_color_manual(values=c("#2FE6DE", "#EA9E8D", "#B2ABF2", "#C5D86D" ), labels = c("Bulk soil", "Inoculum", "Insect", "Rhizosphere")) +
+  guides(colour = guide_legend(nrow=2, title.position = "top"), shape = guide_legend(nrow = 2, title.position = "top")) +
+  scale_shape_discrete(labels = c("Conservation", "Conventional")) +
+  theme(legend.title = element_text(size = 18),
+        legend.text = element_text(size = 14),
+        legend.position = "bottom",
+        legend.title.align = 0.5, 
+        plot.margin = margin(2, 2, 2, 2, "cm"))
+
+#### No inoculum ####
+bd4w_no_inoc <- subset_samples(bd4_wobfree, type != "inoculum")
+bd4w_rare_no_inoc <- rarefy_even_depth(bd4w_no_inoc, sample.size = 1700 , rngseed = 2)
+noinoc_bray <- phyloseq::distance(bd4w_rare_no_inoc, method = "bray")
+noinoc_jaccard <- phyloseq::distance(bd4w_rare_no_inoc, method = "jaccard")
+sample_noinoc <- data.frame(sample_data(bd4w_rare_no_inoc))
+
+
+set.seed(2)
+perms <- with(sample_noinoc, how(nperm = 1000, blocks = Block))
+adonis2(noinoc_bray ~ type * treatment, data = sample_noinoc, permutations = perms)
+
+sample_noinoc2 <- sample_noinoc %>% 
+  rownames_to_column(var = "sample") %>% 
+  dplyr::mutate(type2 = type) %>% 
+  dplyr::mutate(treatment2 = treatment) %>% 
+  unite(type_treat, type2, treatment2, sep = '_')
+pairwise.adonis2(noinoc_bray ~ type_treat, data = sample_noinoc2)
+
+
+## NMDS spider ####
+## Figure building
+nmds_noinoc <- phyloseq::ordinate(bd4w_rare_no_inoc, "NMDS", "bray", k = 3)
+nmds_ord_noinoc <- plot_ordination(bd4w_rare_no_inoc, nmds_noinoc, 
+                type = "samples", color = "treatment", shape = "type")
+
+my.plot <- gg_ordiplot(nmds_rhizo, groups = sample_rhizo$treatment, hull = FALSE, spiders = TRUE, ellipse = FALSE, plot = FALSE)
+points <- my.plot$df_ord
+points2 <-  left_join(rownames_to_column(points), rownames_to_column(sample_rhizo), by = 'rowname')
+cents <- my.plot$df_mean.ord
+spids <- my.plot$df_spiders
+a.plot <- my.plot$plot
+a.plot + 
+  theme_bw() +
+  labs(color="Treatment", x="nMDS1", y="nMDS2") +
+  scale_fill_manual(values=c("#C3BD10", "#137098"), labels = c("Cover crop", "Traditional"))
+
+nmds.spid <- ggplot() +
+  geom_point(aes(x = points$x, y = points$y, colour = points$Group, shape = points2$corn_trait)) +
+  geom_segment(aes(x = spids$x, y = spids$y, xend = spids$cntr.x, yend = spids$cntr.y, color = spids$Group), alpha = 0.5)+
+  scale_color_manual(
+    name = 'Treatments',
+    labels = c("Cover crop no-till","Traditional"),
+    values=c("#C3BD10", "#137098")) + scale_shape_discrete(name = 'Corn type', labels = c("Bt", "non-Bt")) +
+  theme_classic() +
+  xlab("NMDS1") + ylab("NMDS2") +
+  theme(legend.title = element_text(size = 24),
+        legend.text = element_text(size = 20),
+        axis.title = element_text(size = 16))
+
+
+pcoa_noinoc <- phyloseq::ordinate(bd4w_rare_no_inoc, "PCoA", "bray")
+pcoa_ord_noinoc <- plot_ordination(bd4w_rare_no_inoc, nmds_noinoc, 
+                type = "samples", color = "treatment", shape = "type")
+```
+
+Next we examined beta diversity. For this we have to rarify communities given the large variance in sample depth. We have chosen 1300 given that it captures a large amount of the reads for low read samples and retains a high number of samples. Two samples were dropped due to low reads (KP014_C11, KP024_D09). First thing we examined was the type x treatment interaction with Block as the permutational block based on bray curtis distances. We find a significant interaction strongly driven by the lack of difference in the microbiome of larval microbiomes between treatments. Every other sample type has a strong difference in their microbiome from different types. We also see a difference in betadispersion between types. This is driven by differences in the variance across types. Rhizosphere samples have smallest variance, lower than all three other types. Bulk soil has the second lowest variance, also different than all other samples. Inoculum and insect are the highest and not statistically significantly different. I think this is due to the low biomass within these sample types creating significant variance in the communities.
+
+
+```{r out.width=c('50%', '50%'), fig.show='hold'}
+right_side <- plot_grid(obs_type_plot, div_type_plot, labels = c("b", "c"), ncol = 1, align = "v")
+sup1 <- plot_grid(nmds_type_full, right_side, labels = c("a", ""), ncol = 2)
+cowplot::save_plot(plot = sup1, "/Users/PaddockK/Documents/Projects/Cover_crop/cover_crop_git/Figs/230203_supplemental1.pdf", base_height = 8, base_width = 16)
+```
+
+We can dive in further at the type level later. I think it would be nice to pick up some taxa that are present in every sample and plot their relative abundance to see if there is some type of filtering occurring. 
+
+## Rhizosphere specific analyses ####
+Let's move on to the rhizosphere samples. This will focus more on the host-associated effects of the two treatment applications where we see changes.
+### Alpha diversity
+```{r include = FALSE}
+## generate alpha diversity metrics ####
+rhizosphere <- subset_samples(bd4_wobfree, type == "rhizosphere")
+sum(taxa_sums(rhizosphere) == 0)
+rhizosphere <- prune_taxa(taxa_sums(rhizosphere) > 0, rhizosphere)
+sample_rhizo <- data.frame(sample_data(rhizosphere))
+
+rhizo_div <- estimate_richness(rhizosphere, measures = 
+                                       c("Observed", 
+                                        "Chao1", 
+                                        "Shannon", 
+                                        "InvSimpson"))
+rhizo_div <- rownames_to_column(rhizo_div, var = "sample_id")
+sample_rhizo <- rownames_to_column(sample_rhizo, var = "sample_id")
+
+rhizo_div_full <- rhizo_div %>% 
+  left_join(sample_rhizo, by = "sample_id")
+
+
+
+
+## Observed species analysis ####
+rhizo_div_full2 <- rhizo_div_full %>% group_by(treatment, corn_trait, colony, Block) %>% # calculate median values
+  mutate(Obs.med = ifelse(Observed,median(Observed, na.rm=TRUE), ifelse(Observed == NA, NA))) 
+rhizo_div_full2$dat.med.res<-abs(rhizo_div_full2$Observed-rhizo_div_full2$Obs.med) #calculate residual variance
+levene.dat.aov.obs.rz<-aov(dat.med.res~treatment*corn_trait*colony*Block,rhizo_div_full2)
+summary(levene.dat.aov.obs.rz)
+TukeyHSD(levene.dat.aov.obs.rz)
+FittedMeans.obs.trait <-emmeans(levene.dat.aov.obs.rz, pairwise~corn_trait)
+
+obs.aov.mod <- aov(Observed ~ treatment * corn_trait * colony + Block + Block*corn_trait + Block*colony, data = rhizo_div_full)
+shapiro.test(residuals(obs.aov.mod))
+summary(obs.aov.mod)
+TukeyHSD(obs.aov.mod)
+Fitted.means.obs.rz <- emmeans(obs.aov.mod, pairwise ~ treatment | corn_trait)
+Fitted.means.obs.rz2 <- emmeans(obs.aov.mod, pairwise ~ corn_trait | treatment)
+plot(Fitted.means.obs.rz)
+
+
+obs.aov.mod2 <- aov(Observed ~ treatment * corn_trait * colony * Block, data = rhizo_div_full)
+summary(obs.aov.mod2)
+anova(obs.aov.mod, obs.aov.mod2)
+
+obs.glmer.mod1 <- glmer(Observed ~ treatment * corn_trait * colony + (1 + treatment|Block), data = rhizo_div_full, family = poisson)
+Anova(obs.glmer.mod1, type = "III")
+emmeans(obs.glmer.mod1, pairwise~treatment|corn_trait|colony)
+obs.glmer.mod2 <- glmer(Observed ~ treatment * corn_trait * colony + (1|Block), data = rhizo_div_full, family = poisson)
+emmeans(obs.glmer.mod2, pairwise~treatment|corn_trait|colony)
+Anova(obs.glmer.mod2, type = "III")
+anova(obs.glmer.mod1, obs.glmer.mod2)
+
+
+rz.sum.obs <- rhizo_div_full %>% 
+  dplyr::group_by(treatment, corn_trait, colony) %>% 
+  dplyr::summarise(mean_obs = mean(Observed),
+                   sd = std.error(Observed))
+
+
+obs_plot_irz2 <- ggplot(rhizo_div_full, aes(x=corn_trait, y = Observed, fill = treatment)) +
+  scale_fill_manual(values=c("#C3BD10", "#137098"), labels = c("Cover crop no-till", "Traditional")) +
+  geom_boxplot(width=.75, position = position_dodge(width = .9)) + scale_x_discrete(labels = c("Bt", "non-Bt")) + labs(fill = "Treatment") + xlab(label = "Corn type") + ylab(label = "Observed species") + geom_point( position = position_jitterdodge(dodge.width = 0.9, jitter.width = 0.2), alpha = .5) +  theme_classic() + theme(strip.text.x = element_text(size = 26),legend.title = element_text(size = 24),legend.text = element_text(size = 20),axis.title.x = element_text(size = 24, margin = margin(t = 20)),axis.title.y = element_text(size = 24, margin = margin(r = 20)),axis.text = element_text(size = 20))
+
+rz.sum.obs2 <- rhizo_div_full %>% 
+  dplyr::group_by(treatment, corn_trait) %>% 
+  dplyr::summarise(mean_obs = mean(Observed),
+                   sd = std.error(Observed))
+
+obs_plot_irz3 <- ggplot(rz.sum.obs2, aes(x=corn_trait, y = mean_obs, fill = treatment)) +
+  scale_fill_manual(values=c("#C3BD10", "#137098"), labels = c("Cover crop no-till", "Traditional")) +
+  geom_bar(width=0.75, position = position_dodge(width = .9), stat = "identity") + geom_errorbar(aes(ymin=mean_obs-sd, ymax=mean_obs+sd), width=0.07, position = position_dodge(0.9)) + scale_x_discrete(labels = c("Bt", "non-Bt")) + labs(fill = "Treatment") + xlab(label = "Corn type") + ylab(label = "Observed species") + theme_classic() + theme(strip.text.x = element_text(size = 26),legend.title = element_text(size = 24),legend.text = element_text(size = 20),axis.title.x = element_text(size = 24, margin = margin(t = 20)),axis.title.y = element_text(size = 24, margin = margin(r = 20)),axis.text = element_text(size = 20))
+
+emmeans_rhizo_output <- tibble(treatment = c("CC", "CC", "TR", "TR"),
+       corn_trait = c("BT", "Iso", "BT", "Iso"),
+       emmean = c(898, 827, 692, 759), 
+       SE = c(23.8, 23.8, 23.8, 23.8),
+       lower.CL = c(851, 780, 645, 712),
+       upper.CL = c(945, 874, 739, 806))
+
+obs_plot_irz4 <- ggplot(emmeans_rhizo_output, aes(x=corn_trait, y = emmean, fill = treatment)) +
+  scale_fill_manual(values=c("#C3BD10", "#137098"), labels = c("Conservation", "Conventional")) +
+  geom_bar(width=0.75, position = position_dodge(width = .9), stat = "identity") + scale_y_continuous(expand = c(0, 0), limits = c(0, 1000)) + geom_errorbar(aes(ymin=emmean-SE, ymax=emmean+SE), width=0.07, position = position_dodge(0.9)) + scale_x_discrete(labels = c("Bt", "non-Bt")) + labs(fill = "Treatment") + xlab(label = "Corn type") + ylab(label = "Observed species") + theme_classic() + theme(strip.text.x = element_text(size = 26),legend.title = element_text(size = 24),legend.text = element_text(size = 20),axis.title.x = element_text(size = 24, margin = margin(t = 20)),axis.title.y = element_text(size = 24, margin = margin(r = 20)),axis.text = element_text(size = 20), plot.margin = margin(t = 1, r = 1, b = 1, l = 1.5, "cm"))
+
+ggsave("/Users/PaddockK/Documents/Projects/Cover_crop/cover_crop_git/Figs/230203_rhizo_rich_barSE.pdf", dpi = 300, width = 12, height = 7)
+
+
+obs_plot_rz <- ggplot(rz.sum.obs, aes(x=corn_trait, y = mean_obs, fill = treatment)) +
+  geom_bar(width=0.5, position = position_dodge(), stat = "identity") + geom_errorbar(aes(ymin = mean_obs - sd, ymax = mean_obs + sd), width = 0.2, position = position_dodge(0.5), color = "black") + scale_fill_manual(values=c("#C3BD10", "#137098"), labels = c("Cover crop", "Traditional")) + labs(fill = "Treatment") + xlab(label = "Corn trait") + ylab(label = "Observed taxa") + facet_wrap(~colony) + theme_classic()
+print(obs_plot_rz)
+
+## Inverse simpson ####
+rz.sum.simp <- rhizo_div_full %>% 
+  dplyr::group_by(treatment, corn_trait, colony) %>% 
+  dplyr::summarise(mean_simp = mean(InvSimpson),
+                   sd = std.error(InvSimpson))
+
+simp_plot_rz <- ggplot(rz.sum.simp, aes(x=corn_trait, y = mean_simp, fill = treatment)) +
+  geom_bar(width=0.5, position = position_dodge(), stat = "identity") + geom_errorbar(aes(ymin = mean_simp - sd, ymax = mean_simp + sd), width = 0.2, position = position_dodge(0.5), color = "black") + scale_fill_manual(values=c("#C3BD10", "#137098"), labels = c("Cover crop", "Traditional")) + labs(fill = "Treatment") + xlab(label = "Corn trait") + ylab(label = "Inverse Simpson D") + facet_wrap(~colony) + theme_classic()
+
+  # Analysis
+rhizo_div_full3 <- rhizo_div_full %>% group_by(treatment, corn_trait, colony, Block) %>% # calculate median values
+  mutate(simp.med = ifelse(InvSimpson,median(InvSimpson, na.rm=TRUE), ifelse(InvSimpson == NA, NA))) 
+rhizo_div_full3$dat.med.res<-abs(rhizo_div_full3$InvSimpson-rhizo_div_full3$simp.med) #calculate residual variance
+levene.dat.aov.simp.rz<-aov(dat.med.res~treatment*corn_trait*colony*Block,rhizo_div_full3)
+summary(levene.dat.aov.simp.rz)
+
+simp.aov.mod <- aov(InvSimpson ~ treatment * corn_trait * colony + Block + Block*corn_trait + Block*colony, data = rhizo_div_full)
+shapiro.test(residuals(simp.aov.mod))
+summary(simp.aov.mod)
+TukeyHSD(simp.aov.mod)
+Fitted.means.simp.rz <- emmeans(simp.aov.mod, pairwise ~ corn_trait)
+plot(Fitted.means.simp.rz)
+
+```
+
+We are now comparing the richness of rhizosphere communities when grown in cover crop no-till microbes or traditional microbes. We also have two different corn types and three insect infestation types. We only a difference in the variance across samples for corn trait, with non-bt corn having higher variance in the richness measurements. I have worked to develop the most accurate model for these analysis. However, I am confused what to use. The standard anova was built with block, block x corn_trait, block x treatment as random effects. This resulted in a significant treatment x corn trait interaction. However, if I use a generalized linear mixed effects model, with block as the random intercept, I find that significant three way interaction. This seems odd to me, but could be due to the transformation to log ratios. I will ask others about this. To summarize the results from the ANOVA, we find cover crop no-till microbes signficantly boost rhizosphere richness compared to traditionall managed microbes regardless of the insect infection. 
+
+The diversity was not impacted by the management tactic. The only effect we found was Bt roots were significantly more rich than non-Bt roots.
+
+### Beta diversity
+```{r}
+## Full model ####
+rhizosphere
+
+rhizo_bray <- phyloseq::distance(rhizosphere, method = "bray")
+rhizo_jaccard <- phyloseq::distance(rhizosphere, method = "jaccard")
+sample_rhizo <- data.frame(sample_data(rhizosphere))
+
+sample_rhizo2 <- sample_rhizo %>% 
+  dplyr::mutate(treatment2 = treatment) %>% 
+  dplyr::mutate(corn_trait2 = corn_trait) %>% 
+  unite(treat_corn, treatment2, corn_trait2, sep = '_')
+sample_rhizo2$treat_corn <- as.factor(sample_rhizo2$treat_corn)
+
+set.seed(2)
+perms <- with(sample_rhizo, how(nperm = 1000, blocks = Block))
+adonis2(rhizo_bray ~ treatment * corn_trait * colony + Block, data = sample_rhizo, permutations = perms)
+permutest(betadisper(rhizo_bray, sample_rhizo2$treat_corn))
+permutest(betadisper(rhizo_bray, sample_rhizo$treatment))
+
+set.seed(2)
+perms <- with(sample_rhizo, how(nperm = 1000, blocks = Block))
+adonis2(rhizo_jaccard ~ treatment * corn_trait * colony * Block, data = sample_rhizo, permutations = perms)
+permutest(betadisper(rhizo_bray, sample_rhizo2$treat_corn))
+
+set.seed(2)
+perms <- with(sample_rhizo, how(nperm = 1000, blocks = Block))
+adonis2(rhizo_bray ~ treatment * corn_trait * colony, data = sample_rhizo, permutations = perms)
+permutest(betadisper(rhizo_bray, sample_rhizo2$treat_corn))
+
+
+## corn trait effect individual models ####
+
+## BT
+rhizosphere_bt <- subset_samples(rhizosphere, corn_trait == "BT")
+sum(taxa_sums(rhizosphere_bt) == 0)
+rhizosphere_bt <- prune_taxa(taxa_sums(rhizosphere_bt) > 0, rhizosphere_bt)
+
+rhizo_braybt <- phyloseq::distance(rhizosphere_bt, method = "bray")
+rhizo_jaccardbt <- phyloseq::distance(rhizosphere_bt, method = "jaccard")
+sample_rhizobt <- data.frame(sample_data(rhizosphere_bt))
+
+set.seed(2)
+adonis2(rhizo_braybt ~ treatment * colony * Block, data = sample_rhizobt)
+
+
+
+## non-Bt
+rhizosphere_iso <- subset_samples(rhizosphere, corn_trait == "Iso")
+sum(taxa_sums(rhizosphere_iso) == 0)
+rhizosphere_iso <- prune_taxa(taxa_sums(rhizosphere_iso) > 0, rhizosphere_iso)
+
+rhizo_brayiso <- phyloseq::distance(rhizosphere_iso, method = "bray")
+rhizo_jaccardiso <- phyloseq::distance(rhizosphere_iso, method = "jaccard")
+sample_rhizoiso <- data.frame(sample_data(rhizosphere_iso))
+
+set.seed(2)
+adonis2(rhizo_brayiso ~ treatment * colony * Block, data = sample_rhizoiso)
+
+
+
+### Treatment individual models ####
+
+## Cover crop
+rhizosphere_cc <- subset_samples(rhizosphere, treatment == "CC")
+sum(taxa_sums(rhizosphere_cc) == 0)
+rhizosphere_cc <- prune_taxa(taxa_sums(rhizosphere_cc) > 0, rhizosphere_cc)
+
+rhizo_braycc <- phyloseq::distance(rhizosphere_cc, method = "bray")
+rhizo_jaccardcc <- phyloseq::distance(rhizosphere_cc, method = "jaccard")
+sample_rhizocc <- data.frame(sample_data(rhizosphere_cc))
+
+set.seed(2)
+adonis2(rhizo_braycc ~ corn_trait * colony * Block, data = sample_rhizocc)
+
+
+
+## Traditional
+rhizosphere_tr <- subset_samples(rhizosphere, treatment == "TR")
+sum(taxa_sums(rhizosphere_tr) == 0)
+rhizosphere_tr <- prune_taxa(taxa_sums(rhizosphere_tr) > 0, rhizosphere_tr)
+
+rhizo_braytr <- phyloseq::distance(rhizosphere_tr, method = "bray")
+rhizo_jaccardtr <- phyloseq::distance(rhizosphere_tr, method = "jaccard")
+sample_rhizotr <- data.frame(sample_data(rhizosphere_tr))
+
+set.seed(2)
+adonis2(rhizo_braytr ~ corn_trait * colony * Block, data = sample_rhizotr)
+
+
+## Block x treatment effect individual models ####
+    #Block 1
+rhizosphere1 <- subset_samples(rhizosphere, Block == "1")
+sum(taxa_sums(rhizosphere1) == 0)
+rhizosphere1 <- prune_taxa(taxa_sums(rhizosphere1) > 0, rhizosphere1)
+
+rhizo_bray1 <- phyloseq::distance(rhizosphere1, method = "bray")
+rhizo_jaccard1 <- phyloseq::distance(rhizosphere1, method = "jaccard")
+sample_rhizo1 <- data.frame(sample_data(rhizosphere1))
+
+set.seed(2)
+adonis2(rhizo_bray1 ~ treatment * corn_trait * colony, data = sample_rhizo1)
+
+rhizosphere2 <- subset_samples(rhizosphere, Block == "2")
+sum(taxa_sums(rhizosphere2) == 0)
+rhizosphere2 <- prune_taxa(taxa_sums(rhizosphere2) > 0, rhizosphere2)
+
+rhizo_bray2 <- phyloseq::distance(rhizosphere2, method = "bray")
+rhizo_jaccard2 <- phyloseq::distance(rhizosphere2, method = "jaccard")
+sample_rhizo2 <- data.frame(sample_data(rhizosphere2))
+
+set.seed(2)
+adonis2(rhizo_bray2 ~ treatment * corn_trait * colony, data = sample_rhizo2)
+
+rhizosphere3 <- subset_samples(rhizosphere, Block == "3")
+sum(taxa_sums(rhizosphere3) == 0)
+rhizosphere3 <- prune_taxa(taxa_sums(rhizosphere3) > 0, rhizosphere3)
+
+rhizo_bray3 <- phyloseq::distance(rhizosphere3, method = "bray")
+rhizo_jaccard3 <- phyloseq::distance(rhizosphere3, method = "jaccard")
+sample_rhizo3 <- data.frame(sample_data(rhizosphere3))
+
+set.seed(2)
+adonis2(rhizo_bray3 ~ treatment * corn_trait * colony, data = sample_rhizo3)
+
+rhizosphere4 <- subset_samples(rhizosphere, Block == "4")
+sum(taxa_sums(rhizosphere4) == 0)
+rhizosphere4 <- prune_taxa(taxa_sums(rhizosphere4) > 0, rhizosphere4)
+
+rhizo_bray4 <- phyloseq::distance(rhizosphere4, method = "bray")
+rhizo_jaccard4 <- phyloseq::distance(rhizosphere4, method = "jaccard")
+sample_rhizo4 <- data.frame(sample_data(rhizosphere4))
+
+set.seed(2)
+adonis2(rhizo_bray4 ~ treatment * corn_trait * colony, data = sample_rhizo4)
+
+
+
+## Figure building ####
+nmds_rhizo <- phyloseq::ordinate(rhizosphere, "NMDS", "bray")
+nmds_ord_rhizo <- plot_ordination(rhizosphere, nmds_rhizo, 
+                type = "samples", color = "treatment", shape = "corn_trait")
+
+my.plot <- gg_ordiplot(nmds_rhizo, groups = sample_rhizo$treatment, hull = FALSE, spiders = TRUE, ellipse = FALSE, plot = FALSE)
+points <- my.plot$df_ord
+points2 <-  left_join(rownames_to_column(points), rownames_to_column(sample_rhizo), by = 'rowname')
+cents <- my.plot$df_mean.ord
+spids <- my.plot$df_spiders
+a.plot <- my.plot$plot
+a.plot + 
+  theme_bw() +
+  labs(color="Treatment", x="nMDS1", y="nMDS2") +
+  scale_fill_manual(values=c("#C3BD10", "#137098"), labels = c("Conservation", "Conventional"))
+
+nmds.spid <- ggplot() +
+  geom_point(aes(x = points$x, y = points$y, colour = points$Group, shape = points2$corn_trait)) +
+  geom_segment(aes(x = spids$x, y = spids$y, xend = spids$cntr.x, yend = spids$cntr.y, color = spids$Group), alpha = 0.5)+
+  scale_color_manual(
+    name = 'Treatments',
+    labels = c("Conservation","Conventional"),
+    values=c("#C3BD10", "#137098")) + scale_shape_discrete(name = 'Corn type', labels = c("Bt", "non-Bt")) +
+  theme_classic() +
+  xlab("NMDS1") + ylab("NMDS2") +
+  theme(legend.title = element_text(size = 24),
+        legend.text = element_text(size = 20),
+        axis.title = element_text(size = 16))
+
+ggsave("/Users/PaddockK/Documents/Projects/Cover_crop/cover_crop_git/Figs/230203_treatment_corn_nmds.pdf", dpi = 300, width = 10, height = 7)
+
+
+pcoa_rhizo <- phyloseq::ordinate(rhizosphere, "MDS", "bray")
+pcoa_ord_rhizo <- plot_ordination(rhizosphere, pcoa_rhizo, 
+                type = "samples", color = "treatment", shape = "corn_trait")
+```
+
+
+```{r}
+nmds.spid
+obs_plot_irz4
+cp <- plot_grid(nmds.spid, obs_plot_irz4, nrow = 1, align = "h", axis = "bt", labels = c("b", "c"))
+cpline <- ggdraw(cp) + 
+  geom_text(
+    data = data.frame(x = 0.673, y = 0.92, label = "***"),
+    aes(x, y, label = label),
+    size = 20/.pt,
+    inherit.aes = FALSE
+  ) +
+  geom_text(
+    data = data.frame(x = 0.771, y = 0.93, label = "NS"),
+    aes(x, y, label = label),
+    size = 14/.pt,
+    inherit.aes = FALSE
+  ) +
+    draw_line(
+    x = c(0.652, 0.694),
+    y = c(.91, 0.91),
+    color = "black", size = 1
+  ) +
+    draw_line(
+    x = c(0.75, 0.792),
+    y = c(.91, 0.91),
+    color = "black", size = 1
+  )
+cowplot::save_plot(plot = cpline, "/Users/PaddockK/Documents/Projects/Cover_crop/cover_crop_git/Figs/rhizosphere_cowplot.pdf", base_height = 6, base_width = 16)
+```
+
+We compared the overall rhizosphere community composition based on bray curtis distance and find that there is a significant treatment x corn trait interaction. To better understand this interaction while incorporating the random factors, we ran individual models for Bt and non-Bt corn to assess the interaction effect. The interaction is due to the magnitude of the effect. Bt is more strongly effected by the soil treatment compared to the non-Bt corn. When comparing within treatment, we see that cover crop microbes do not result in different corn rhizospheres of Bt and non-Bt. Traditional soil microbes do. There is no difference in the betadispersion between treatment groups. Larval feeding did not impact rhizosphere communites.
+
+We should report some of the microbes found in the rhizosphere of each sample type.
+```{r}
+
+```
+
+
+The last thing I want to try, and it may be incorrect, is to correlate rhizosphere richness with fitness outcomes. I don't have data on the rhizosphere's of the insects we weighed, but given that they were inoculated with the same microbiome, and grown right next to each other, it may be ok.
+
+## Correlation microbes and fitness
+```{r}
+fit.dat <- read_csv("/Users/PaddockK/Documents/Projects/Cover_crop/cover_crop_git/Data/Fitness/21_06_03_calculated_fitness_root.csv")
+colnames(fit.dat)[which(names(fit.dat) == "rep")] <- "Rep"
+colnames(fit.dat)[which(names(fit.dat) == "block")] <- "Block"
+fit.dat$root_dw_per_plant <- as.numeric(fit.dat$root_dw_per_plant)
+fit.dat$weight_per_larvae <- as.numeric(fit.dat$weight_per_larvae)
+fit.dat$Rep <- as.factor(fit.dat$Rep)
+fit.dat$Block <- as.factor(fit.dat$Block)
+fit.dat[fit.dat == "RES"] <- "Res"
+fit.dat[fit.dat == "SUS"] <- "Sus"
+fit.dat[fit.dat == "ISO"] <- "Iso"
+rhizo_div_full
+
+rhizo_fit <- fit.dat %>% 
+  left_join(rhizo_div_full, by = c('Rep', 'Block', 'treatment', 'corn_trait', 'colony'))
+
+rhizo_fit_mut <- rhizo_fit %>% 
+  dplyr::mutate(corn2 = corn_trait) %>% 
+  dplyr::mutate(colony2 = colony) %>% 
+  unite(corn_col, corn2, colony2, sep = '_')
+
+
+ggplot(rhizo_fit, aes(x = log(Observed), y = log(weight_per_larvae), color = corn_trait)) +
+  geom_point(stat = "identity") +
+  geom_smooth(method = lm) +
+  theme_classic()
+
+ggplot(rhizo_fit_mut, aes(x = log(Observed), y = log(weight_per_larvae), color = corn_col)) +
+  geom_point(stat = "identity") +
+  geom_smooth(method = lm) +
+  theme_classic()
+
+ggplot(rhizo_fit, aes(x = log(Observed), y = log(root_dw_per_plant), color = corn_trait)) +
+  geom_point(stat = "identity") +
+  geom_smooth(method = lm) +
+  theme_classic()
+
+ggplot(rhizo_fit_mut, aes(x = log(Observed), y = log(root_dw_per_plant), color = corn_col)) +
+  geom_point(stat = "identity") +
+  geom_smooth(method = lm) +
+  theme_classic()
+
+```
+I want to see if any bacterial Phylum or Order correlates to larval weight. We can maybe say that these taxa are responsible for the fitness change.
+
+```{r}
+#Begin merge of insect and inoculum data into one object
+rhizo_fit2 <- column_to_rownames(rhizo_fit, var = "sample_id" )
+rhizo_fit3 <- rhizo_fit2[complete.cases(rhizo_fit2[ , 19]),]
+
+bd4_sam = sample_data(rhizo_fit3)
+bd4_tax = tax_table(bd4_wobfree) 
+bd4_otu = otu_table(bd4_wobfree)
+sample_names(bd4_sam)
+
+
+#merged phyloseq object
+bd4_wobfree_fitness <- merge_phyloseq(bd4_sam, bd4_tax, bd4_otu)
+
+
+## Resistant insects on Bt
+resistant <- subset_samples(bd4_wobfree_fitness, colony == "Res")
+sum(taxa_sums(resistant) == 0)
+resistant <- prune_taxa(taxa_sums(resistant) > 0, resistant)
+
+res_bt <- subset_samples(resistant, corn_trait == "BT")
+sum(taxa_sums(res_bt) == 0)
+res_bt <- prune_taxa(taxa_sums(res_bt) > 0, res_bt)
+
+res_bt_alt = tax_glom(res_bt, "Order")
+rbt2 <- filter_taxa(res_bt_alt, function(x){sum(x > 0) > 1}, prune = TRUE)
+
+
+out <- ancombc(phyloseq = rbt2, formula = "weight_per_larvae", 
+              p_adj_method = "holm", zero_cut = 0.90, lib_cut = 1000, 
+              group = "treatment", struc_zero = TRUE, neg_lb = TRUE, tol = 1e-5, 
+              max_iter = 100, conserve = TRUE, alpha = 0.05, global = TRUE)
+res <- out$res
+res$W
+ancom_res_df <- data.frame(
+  Species = row.names(out$res$beta),
+  beta = unlist(out$res$beta),
+  se = unlist(out$res$se),
+  W = unlist(out$res$W),
+  p_val = unlist(out$res$p_val),
+  q_val = unlist(out$res$q_val),
+  diff_abn = unlist(out$res$diff_abn))
+view(ancom_res_df)
+#39cae415b8ef6db053b56997e6329d06
+hits <- "39cae415b8ef6db053b56997e6329d06"
+
+tax_tab_res_bt <- as.data.frame(tax_table(res_bt_alt)) %>% rownames_to_column(var = "asv_id") %>% filter(asv_id %in% hits)
+rel_abund <- transform_sample_counts(rbt2, function(x) {x/sum(x)}) %>% subset_taxa(Order %in% tax_tab_res_bt$Order)
+res_bt_rel_abund <- as.data.frame(t(data.frame(otu_table(rel_abund)))) %>% rownames_to_column(var = "sample_id") %>% left_join(rhizo_fit, by = "sample_id")
+names(res_bt_rel_abund)[names(res_bt_rel_abund) == '39cae415b8ef6db053b56997e6329d06'] <- "relative_abundance"
+
+
+ggplot(res_bt_rel_abund, aes(x = log10(weight_per_larvae), y = log10(relative_abundance))) +
+  geom_point(stat = "identity") +
+  geom_smooth(method = lm) +
+  theme_classic()
+
+
+
+## Resistant on non-Bt
+res_iso <- subset_samples(resistant, corn_trait == "Iso")
+sum(taxa_sums(res_iso) == 0)
+res_iso <- prune_taxa(taxa_sums(res_iso) > 0, res_iso)
+
+res_iso_alt = tax_glom(res_iso, "Order")
+riso2 <- filter_taxa(res_iso_alt, function(x){sum(x > 0) > 1}, prune = TRUE)
+
+
+out <- ancombc(phyloseq = riso2, formula = "weight_per_larvae", 
+              p_adj_method = "holm", zero_cut = 0.90, lib_cut = 1000, 
+              group = "treatment", struc_zero = TRUE, neg_lb = TRUE, tol = 1e-5, 
+              max_iter = 100, conserve = TRUE, alpha = 0.05, global = TRUE)
+res <- out$res
+res$W
+ancom_res_df_iso <- data.frame(
+  Species = row.names(out$res$beta),
+  beta = unlist(out$res$beta),
+  se = unlist(out$res$se),
+  W = unlist(out$res$W),
+  p_val = unlist(out$res$p_val),
+  q_val = unlist(out$res$q_val),
+  diff_abn = unlist(out$res$diff_abn))
+view(ancom_res_df_iso)
+#3f112f45f2bb754bfefb69868ddf4f34
+hits <- "3f112f45f2bb754bfefb69868ddf4f34"
+
+tax_tab_res_iso <- as.data.frame(tax_table(res_iso_alt)) %>% rownames_to_column(var = "asv_id") %>% filter(asv_id %in% hits)
+rel_abund <- transform_sample_counts(riso2, function(x) {x/sum(x)}) %>% subset_taxa(Order %in% tax_tab_res_iso$Order)
+res_iso_rel_abund <- as.data.frame(t(data.frame(otu_table(rel_abund)))) %>% rownames_to_column(var = "sample_id") %>% left_join(rhizo_fit, by = "sample_id")
+names(res_iso_rel_abund)[names(res_iso_rel_abund) == '3f112f45f2bb754bfefb69868ddf4f34'] <- "relative_abundance"
+
+
+ggplot(res_iso_rel_abund, aes(x = log10(weight_per_larvae), y = log10(relative_abundance))) +
+  geom_point(stat = "identity") +
+  geom_smooth(method = lm) +
+  theme_classic()
+
+
+## Susceptible on Bt
+susceptible <- subset_samples(bd4_wobfree_fitness, colony == "Sus")
+sum(taxa_sums(susceptible) == 0)
+susceptible <- prune_taxa(taxa_sums(susceptible) > 0, susceptible)
+
+sus_bt <- subset_samples(susceptible, corn_trait == "BT")
+sum(taxa_sums(sus_bt) == 0)
+sus_bt <- prune_taxa(taxa_sums(sus_bt) > 0, sus_bt)
+
+sus_bt_alt = tax_glom(sus_bt, "Order")
+sbt2 <- filter_taxa(sus_bt_alt, function(x){sum(x > 0) > 1}, prune = TRUE)
+
+
+out <- ancombc(phyloseq = sbt2, formula = "weight_per_larvae", 
+              p_adj_method = "holm", zero_cut = 0.90, lib_cut = 1000, 
+              group = "treatment", struc_zero = TRUE, neg_lb = TRUE, tol = 1e-5, 
+              max_iter = 100, conserve = TRUE, alpha = 0.05, global = TRUE)
+res <- out$res
+res$W
+ancom_sus_df_bt <- data.frame(
+  Species = row.names(out$res$beta),
+  beta = unlist(out$res$beta),
+  se = unlist(out$res$se),
+  W = unlist(out$res$W),
+  p_val = unlist(out$res$p_val),
+  q_val = unlist(out$res$q_val),
+  diff_abn = unlist(out$res$diff_abn))
+view(ancom_sus_df_bt)
+hits <- c("e24110d9ddec181950e84ba341543ba8", "279ec18ace7a45fb812a87c1452ae4c7")
+
+tax_tab_sus_bt <- as.data.frame(tax_table(sus_bt_alt)) %>% rownames_to_column(var = "asv_id") %>% filter(asv_id %in% hits)
+#e24110d9ddec181950e84ba341543ba8
+#279ec18ace7a45fb812a87c1452ae4c7
+
+## Sus on non-Bt
+sus_iso <- subset_samples(susceptible, corn_trait == "Iso")
+sum(taxa_sums(sus_iso) == 0)
+sus_iso <- prune_taxa(taxa_sums(sus_iso) > 0, sus_iso)
+
+sus_iso_alt = tax_glom(sus_iso, "Order")
+siso2 <- filter_taxa(sus_iso_alt, function(x){sum(x > 0) > 1}, prune = TRUE)
+
+
+out <- ancombc(phyloseq = siso2, formula = "weight_per_larvae", 
+              p_adj_method = "holm", zero_cut = 0.90, lib_cut = 1000, 
+              group = "treatment", struc_zero = TRUE, neg_lb = TRUE, tol = 1e-5, 
+              max_iter = 100, conserve = TRUE, alpha = 0.05, global = TRUE)
+res <- out$res
+res$W
+ancom_sus_df_iso <- data.frame(
+  Species = row.names(out$res$beta),
+  beta = unlist(out$res$beta),
+  se = unlist(out$res$se),
+  W = unlist(out$res$W),
+  p_val = unlist(out$res$p_val),
+  q_val = unlist(out$res$q_val),
+  diff_abn = unlist(out$res$diff_abn))
+view(ancom_sus_df_iso)
+#887759038a8fdd47034a6244b365ee10
+hits <- "887759038a8fdd47034a6244b365ee10"
+
+tax_tab_sus_iso <- as.data.frame(tax_table(sus_iso_alt)) %>% rownames_to_column(var = "asv_id") %>% filter(asv_id %in% hits)
+
+### Total sample set
+bd4_wobfree_fitness
+full_alt = tax_glom(bd4_wobfree_fitness, "Order")
+fa2 <- filter_taxa(full_alt, function(x){sum(x > 0) > 1}, prune = TRUE)
+
+out <- ancombc(phyloseq = fa2, formula = "weight_per_larvae", 
+              p_adj_method = "holm", zero_cut = 0.90, lib_cut = 1000, 
+              group = "treatment", struc_zero = TRUE, neg_lb = TRUE, tol = 1e-5, 
+              max_iter = 100, conserve = TRUE, alpha = 0.05, global = TRUE)
+res <- out$res
+res$W
+ancom_df_full <- data.frame(
+  Species = row.names(out$res$beta),
+  beta = unlist(out$res$beta),
+  se = unlist(out$res$se),
+  W = unlist(out$res$W),
+  p_val = unlist(out$res$p_val),
+  q_val = unlist(out$res$q_val),
+  diff_abn = unlist(out$res$diff_abn))
+view(ancom_df_full)
+#39cae415b8ef6db053b56997e6329d06
+#015f67f8c901c757442ef3fd1dd57abb
+
+full_alt_class = tax_glom(bd4_wobfree_fitness, "Class")
+fac2 <- filter_taxa(full_alt_class, function(x){sum(x > 0) > 1}, prune = TRUE)
+
+out <- ancombc(phyloseq = fac2, formula = "weight_per_larvae", 
+              p_adj_method = "holm", zero_cut = 0.90, lib_cut = 1000, 
+              group = "treatment", struc_zero = TRUE, neg_lb = TRUE, tol = 1e-5, 
+              max_iter = 100, conserve = TRUE, alpha = 0.05, global = TRUE)
+res <- out$res
+res$W
+ancom_df_full_class <- data.frame(
+  Species = row.names(out$res$beta),
+  beta = unlist(out$res$beta),
+  se = unlist(out$res$se),
+  W = unlist(out$res$W),
+  p_val = unlist(out$res$p_val),
+  q_val = unlist(out$res$q_val),
+  diff_abn = unlist(out$res$diff_abn))
+view(ancom_df_full_class)
+
+
+full_alt_fam = tax_glom(bd4_wobfree_fitness, "Family")
+faf2 <- filter_taxa(full_alt_fam, function(x){sum(x > 0) > 1}, prune = TRUE)
+
+out <- ancombc(phyloseq = faf2, formula = "weight_per_larvae", 
+              p_adj_method = "holm", zero_cut = 0.90, lib_cut = 1000, 
+              group = "treatment", struc_zero = TRUE, neg_lb = TRUE, tol = 1e-5, 
+              max_iter = 100, conserve = TRUE, alpha = 0.05, global = TRUE)
+res <- out$res
+res$W
+ancom_df_full_fam <- data.frame(
+  Species = row.names(out$res$beta),
+  beta = unlist(out$res$beta),
+  se = unlist(out$res$se),
+  W = unlist(out$res$W),
+  p_val = unlist(out$res$p_val),
+  q_val = unlist(out$res$q_val),
+  diff_abn = unlist(out$res$diff_abn))
+view(ancom_df_full_fam)
+
+
+### Non-Bt res and susceptible
+non_bt <- subset_samples(bd4_wobfree_fitness, corn_trait == "Iso")
+sum(taxa_sums(non_bt) == 0)
+non_bt <- prune_taxa(taxa_sums(non_bt) > 0, non_bt)
+
+non_bt2 = tax_glom(non_bt, "Order")
+non_bt2 <- filter_taxa(non_bt2, function(x){sum(x > 0) > 1}, prune = TRUE)
+
+
+out <- ancombc(phyloseq = non_bt2, formula = "weight_per_larvae", 
+              p_adj_method = "holm", zero_cut = 0.90, lib_cut = 1000, 
+              group = "treatment", struc_zero = TRUE, neg_lb = TRUE, tol = 1e-5, 
+              max_iter = 100, conserve = TRUE, alpha = 0.05, global = TRUE)
+res <- out$res
+res$W
+ancom_res_sus_df <- data.frame(
+  Species = row.names(out$res$beta),
+  beta = unlist(out$res$beta),
+  se = unlist(out$res$se),
+  W = unlist(out$res$W),
+  p_val = unlist(out$res$p_val),
+  q_val = unlist(out$res$q_val),
+  diff_abn = unlist(out$res$diff_abn))
+view(ancom_res_sus_df)
+
+
+
+```
+
+We find two taxa that seem to be correlated with the decrease in weight. I want to try to account for some variance due to the colony and the known corn trait effect. We will extract residuals from the model and use those log transformed residuals to calculate differential abundance of orders.
+
+```{r}
+#Transform dry weight values
+weight.tran <- fit.dat.wcr %>% 
+  dplyr::select(treatment, corn_trait, colony, rep, block, weight_per_larvae) %>% 
+  mutate(sqrt_wt = weight_per_larvae^(1/2)) 
+
+weight.resid.mod <- aov(sqrt_wt ~ corn_trait*colony + block, data = weight.tran)
+weight.resid <- residuals(weight.resid.mod)
+weight.resid.log <- as.data.frame(log10(1+weight.resid))
+weight.tran3 <- weight.tran[complete.cases(weight.tran[ , 6]),]
+weight.tran4 <- cbind(weight.tran3,weight.resid.log)
+colnames(weight.tran4)[which(names(weight.tran4) == "rep")] <- "Rep"
+colnames(weight.tran4)[which(names(weight.tran4) == "block")] <- "Block"
+weight.tran4$Rep <- as.factor(weight.tran4$Rep)
+weight.tran4$Block <- as.factor(weight.tran4$Block)
+weight.tran4[weight.tran4 == "RES"] <- "Res"
+weight.tran4[weight.tran4 == "SUS"] <- "Sus"
+weight.tran4[weight.tran4 == "ISO"] <- "Iso"
+#rhizo_fit3 <- rownames_to_column(rhizo_fit3, var = "sample_id" )
+weight.rhizo.met <- rhizo_fit3 %>% 
+  left_join(weight.tran4, by = c("treatment", 'corn_trait', 'colony', 'Rep', 'Block'))
+weight.rhizo.met2 <- column_to_rownames(weight.rhizo.met, var = "sample_id")
+
+bd4_sam = sample_data(weight.rhizo.met2)
+bd4_tax = tax_table(bd4_wobfree) 
+bd4_otu = otu_table(bd4_wobfree)
+
+
+
+#merged phyloseq object
+bd4_wobfree_fitness_resids <- merge_phyloseq(bd4_sam, bd4_tax, bd4_otu)
+bd4_wobfree_fitness_resids2 <- merge_phyloseq(bd4_sam, bd4_tax, bd4_otu)
+
+# Add weight.tran.4 as meta data to phyloseq object
+
+full_alt = tax_glom(bd4_wobfree_fitness_resids, "Order")
+fa2 <- filter_taxa(full_alt, function(x){sum(x > 0) > 1}, prune = TRUE)
+
+out <- ancombc(phyloseq = fa2, formula = "log10(1 + weight.resid)", 
+              p_adj_method = "holm", zero_cut = 0.90, lib_cut = 1000, 
+              group = "treatment", struc_zero = TRUE, neg_lb = TRUE, tol = 1e-5, 
+              max_iter = 100, conserve = TRUE, alpha = 0.05, global = TRUE)
+res <- out$res
+res$W
+ancom_res_df <- data.frame(
+  Species = row.names(out$res$beta),
+  beta = unlist(out$res$beta),
+  se = unlist(out$res$se),
+  W = unlist(out$res$W),
+  p_val = unlist(out$res$p_val),
+  q_val = unlist(out$res$q_val),
+  diff_abn = unlist(out$res$diff_abn))
+view(ancom_res_df)
+
+######
+full_alt2 = tax_glom(bd4_wobfree_fitness_resids2, "Order")
+fa22 <- filter_taxa(full_alt2, function(x){sum(x > 0) > 1}, prune = TRUE)
+
+out <- ancombc(phyloseq = fa22, formula = "log10(1 + weight.resid)", 
+              p_adj_method = "holm", zero_cut = 0.90, lib_cut = 1000, 
+              group = "treatment", struc_zero = TRUE, neg_lb = TRUE, tol = 1e-5, 
+              max_iter = 100, conserve = TRUE, alpha = 0.05, global = TRUE)
+res <- out$res
+res$W
+ancom_res_df <- data.frame(
+  Species = row.names(out$res$beta),
+  beta = unlist(out$res$beta),
+  se = unlist(out$res$se),
+  W = unlist(out$res$W),
+  p_val = unlist(out$res$p_val),
+  q_val = unlist(out$res$q_val),
+  diff_abn = unlist(out$res$diff_abn))
+view(ancom_res_df)
+```
+
+
+## Descriptors and differential abundance
+Let's finish the analyses up with some descriptors and some differential abundance testing between signifincantly different communities.
+
+```{r}
+## Soil ####
+bulk_soil <- subset_samples(bd4_wobfree, type == "bulk_soil")
+sum(taxa_sums(bulk_soil) == 0)
+bulk_soil <- prune_taxa(taxa_sums(bulk_soil) > 0, bulk_soil)
+bulk_soil_prev <- prev_tables(bulk_soil)
+view(head(bulk_soil_prev[2], 125))
+bulk_soil_prev2 <- prevalence_table(bulk_soil)
+view(head(bulk_soil_prev2, 500))
+
+# cover crop
+bulk_soil_cc <- subset_samples(bulk_soil, treatment == "CC")
+sum(taxa_sums(bulk_soil_cc) == 0)
+bulk_soil_cc <- prune_taxa(taxa_sums(bulk_soil_cc) > 0, bulk_soil_cc)
+bulk_soil_cc_prev <- prev_tables(bulk_soil_cc)
+view(head(bulk_soil_cc_prev[2], 125))
+bulk_soil_cc_prev2 <- prevalence_table(bulk_soil_cc)
+view(head(bulk_soil_cc_prev2, 125))
+
+#traditional
+bulk_soil_tr <- subset_samples(bulk_soil, treatment == "TR")
+sum(taxa_sums(bulk_soil_tr) == 0)
+bulk_soil_tr <- prune_taxa(taxa_sums(bulk_soil_tr) > 0, bulk_soil_tr)
+bulk_soil_tr_prev <- prev_tables(bulk_soil_tr)
+view(head(bulk_soil_tr_prev[2], 125))
+bulk_soil_tr_prev2 <- prevalence_table(bulk_soil_tr)
+view(head(bulk_soil_tr_prev2, 125))
+
+
+## Rhizosphere ####
+rhizosphere <- subset_samples(bd4_wobfree, type == "rhizosphere")
+sum(taxa_sums(rhizosphere) == 0)
+rhizosphere <- prune_taxa(taxa_sums(rhizosphere) > 0, rhizosphere)
+
+# Rhizosphere traditional
+rhizosphere_tr 
+# Rhizosphere traditional Bt
+rhizosphere_tr_bt <- subset_samples(rhizosphere_tr, corn_trait == "BT")
+sum(taxa_sums(rhizosphere_tr_bt) == 0)
+rhizosphere_tr_bt <- prune_taxa(taxa_sums(rhizosphere_tr_bt) > 0, rhizosphere_tr_bt)
+rhizosphere_tr_bt_prev <- prev_tables(rhizosphere_tr_bt)
+view(head(rhizosphere_tr_bt_prev[2], 125))
+rhizosphere_tr_bt_prev2 <- prevalence_table(rhizosphere_tr_bt)
+view(head(rhizosphere_tr_bt_prev2, 125))
+# Rhizosphere traditional iso
+rhizosphere_tr_iso <- subset_samples(rhizosphere_tr, corn_trait == "Iso")
+sum(taxa_sums(rhizosphere_tr_iso) == 0)
+rhizosphere_tr_iso <- prune_taxa(taxa_sums(rhizosphere_tr_iso) > 0, rhizosphere_tr_iso)
+rhizosphere_tr_iso_prev <- prev_tables(rhizosphere_tr_iso)
+view(head(rhizosphere_tr_iso_prev[2], 125))
+rhizosphere_tr_iso_prev2 <- prevalence_table(rhizosphere_tr_iso)
+view(head(rhizosphere_tr_iso_prev2, 125))
+# Rhizosphere cover crop
+rhizosphere_cc  
+
+# Rhizosphere cover crop Bt
+rhizosphere_cc_bt <- subset_samples(rhizosphere_cc, corn_trait == "BT")
+sum(taxa_sums(rhizosphere_cc_bt) == 0)
+rhizosphere_cc_bt <- prune_taxa(taxa_sums(rhizosphere_cc_bt) > 0, rhizosphere_cc_bt)
+rhizosphere_cc_bt_prev <- prev_tables(rhizosphere_cc_bt)
+view(head(rhizosphere_cc_bt_prev[2], 125))
+rhizosphere_cc_bt_prev2 <- prevalence_table(rhizosphere_cc_bt)
+view(head(rhizosphere_cc_bt_prev2, 125))
+
+# Rhizosphere cover crop iso
+rhizosphere_cc_iso <- subset_samples(rhizosphere_cc, corn_trait == "Iso")
+sum(taxa_sums(rhizosphere_cc_iso) == 0)
+rhizosphere_cc_iso <- prune_taxa(taxa_sums(rhizosphere_cc_iso) > 0, rhizosphere_cc_iso)
+rhizosphere_cc_iso_prev <- prev_tables(rhizosphere_cc_iso)
+view(head(rhizosphere_cc_iso_prev[2], 125))
+rhizosphere_cc_iso_prev2 <- prevalence_table(rhizosphere_cc_iso)
+view(head(rhizosphere_cc_iso_prev2, 125))
+## Insect ####
+insect <- subset_samples(bd4_wobfree, type == "insect")
+sum(taxa_sums(insect) == 0)
+insect <- prune_taxa(taxa_sums(insect) > 0, insect)
+insect_prev <- prev_tables(insect)
+insect_prev2 <- prevalence_table(insect)
+
+
+### Bar plot individual averages ####
+sample_bd4_wobfree2 <- sample_bd4_wobfree %>% 
+  dplyr::mutate(treatment2 = treatment) %>% 
+  dplyr::mutate(type2 = type) %>% 
+  dplyr::mutate(colony2 = colony) %>% 
+  dplyr::mutate(corn_trait2 = corn_trait) %>% 
+  unite(indiv_samps, type2, treatment2, corn_trait2, colony2, sep = '_')
+
+bd4w2_otu <- otu_table(bd4_wobfree)
+bd4w2_tax <- tax_table(bd4_wobfree)
+testsampnam <- sample_data(bd4_wobfree)
+sample_names(testsampnam)
+
+samp_bd4w2 <- as.data.frame(rownames_to_column(sample_bd4_wobfree2, var = "sample_id" ))
+view(samp_bd4w2)
+samp_bd4w2_names <- as.vector(samp_bd4w2$sample_id)
+samp_bd4w3 <- sample_bd4_wobfree2
+sample_names(samp_bd4w3) <- samp_bd4w2_names
+samp_bd4w3 <- sample_data(samp_bd4w3)
+
+
+bd4w2 <- merge_phyloseq(as.data.frame(samp_bd4w3), bd4w2_tax, bd4w2_otu)
+bd4w2_noinoc <- subset_samples(bd4w2, type != "inoculum")
+sum(taxa_sums(bd4w2_noinoc) == 0)
+bd4w2_noinoc <- prune_taxa(taxa_sums(bd4w2_noinoc) > 0, bd4w2_noinoc)
+
+
+bd4w2_merge <- merge_samples(bd4w2_noinoc, group = "indiv_samps")
+sample_bd4w2_merge <- data.frame(sample_data(bd4w2_merge))
+sample_bd4w2_merge2 <- rownames_to_column(sample_bd4w2_merge, var = "sample")
+sample_sums(bd4w2_merge)
+bd4w2_merge_rare <- rarefy_even_depth(bd4w2_merge, sample.size = 61235, rngseed = 2)
+sample_sums(bd4w2_merge_rare)
+### Bar plot
+samp_glom <- tax_glom(physeq = bd4w2_merge_rare,taxrank = "Class")
+sample_sums(samp_glom)
+samp_glom2 <- transform_sample_counts(samp_glom, function(x) {x/sum(x)})
+sample_sums(samp_glom2)
+data_glom2 <- psmelt(samp_glom2) # create dataframe from phyloseq object
+data_glom2$class <- as.character(data_glom2$Class) #convert to character
+data_glom2$Sample <- factor(data_glom2$Sample, levels = c("bulk_soil_CC__", "bulk_soil_TR__", "rhizosphere_CC_BT_CTRL", "rhizosphere_CC_BT_Sus", "rhizosphere_CC_BT_Res", "rhizosphere_CC_Iso_CTRL", "rhizosphere_CC_Iso_Sus", "rhizosphere_CC_Iso_Res", "rhizosphere_TR_BT_CTRL", "rhizosphere_TR_BT_Sus", "rhizosphere_TR_BT_Res", "rhizosphere_TR_Iso_CTRL", "rhizosphere_TR_Iso_Sus", "rhizosphere_TR_Iso_Res", "insect_CC_BT_Res", "insect_CC_Iso_Res", "insect_TR_BT_Res", "insect_TR_Iso_Res"))
+data_glom2$Abundance <- as.numeric(data_glom2$Abundance)
+
+#simple way to rename phyla with < 1% abundance
+data_glom2$class[data_glom2$Abundance < .01 ] <- "< 1% abund."
+
+#Count # phyla to set color palette
+Count = length(unique(data_glom2$class))
+Count
+unique(data_glom2$class)
+colourCount = length(unique(data_glom2$class))
+getPalette = colorRampPalette(brewer.pal(9, "Set1"))
+
+
+
+phylum_plot <- ggplot(data=data_glom2, aes(x=Sample, y=Abundance, fill=class))
+
+
+samp_fig <- phylum_plot + geom_bar(aes(), stat="identity", position="stack", width = 1) +
+  scale_y_continuous(expand = c(0,0), limits = c(0, 1), breaks = seq(0, 1, 0.25)) +
+  scale_fill_manual(values = getPalette(colourCount)) +
+  labs(fill = "Class") + xlab("Sample Type") + ylab("Relative Abundance") + guides(fill = guide_legend(nrow = 2)) + theme_classic() +
+  theme(legend.position = "bottom",
+        axis.text.x = element_text(angle = 90),
+        axis.title.x = element_text(size = 14, vjust = -2),
+        axis.title.y = element_text(size = 14, vjust = 2),
+        plot.margin = margin(30,30,30,30),
+        legend.text = element_text(size = 12),
+        legend.title = element_text(size = 15), 
+        strip.text.x = element_text(size = 15))
+ggsave("/Users/PaddockK/Documents/Projects/Cover_crop/cover_crop_git/Figs/221223_type_bar_plot.pdf", dpi = 300, width = 24, height = 6)
+
+samp_fig2 <- phylum_plot + geom_bar(aes(), stat="identity", position="stack", width = 1) +
+  scale_y_continuous(expand = c(0,0), limits = c(0, 1), breaks = seq(0, 1, 0.25)) +
+ scale_fill_manual(values = c("#78a1bb", "#a3b18a",  "#37505c", "#113537","#96616b", 
+                               "#283044",  "#63474d", "#ffead0", "#4a4238",  "#C7CB85",
+                               "#508484", "#454372","#D5A021","#502419", "#70877F", "#2F2963",
+                               "#C4A77D","#4d5359","#7EA172",  "#BFCBC2", "#3B3561",
+                               "#63474d", "#ef946c", "#C08497" )) +
+  labs(fill = "Class") + xlab("Sample Type") + ylab("Relative Abundance") + guides(fill = guide_legend(nrow = 2)) + theme_classic() +
+  theme(legend.position = "bottom",
+        axis.text.x = element_text(angle = 90, size = 6),
+        axis.ticks.x = element_blank(),
+        axis.title.x = element_blank(),
+        axis.title.y = element_text(size = 18, vjust = 2),
+        plot.margin = margin(30,30,30,30),
+        legend.text = element_text(size = 12),
+        legend.title = element_text(size = 15), 
+        strip.text.x = element_text(size = 15))
+
+samp_fig2
+
+ggsave("/Users/PaddockK/Documents/Projects/Cover_crop/cover_crop_git/Figs/220117_type_bar_plot.pdf", dpi = 300, width = 24, height = 6)
+```
+### Differential abundance testing ANCOM soil
+```{r}
+## Class level ####
+soil_class <- tax_glom(bulk_soil, taxrank = "Class")
+
+out_class <- ancombc(phyloseq = soil_class, formula = "treatment", 
+              p_adj_method = "holm", zero_cut = 0.90, lib_cut = 1000, 
+              group = "treatment", struc_zero = TRUE, neg_lb = TRUE, tol = 1e-5, 
+              max_iter = 100, conserve = TRUE, alpha = 0.05, global = TRUE)
+res_class <- out_class$res
+
+samp_fracc = out_class$samp_frac
+
+samp_fracc[is.na(samp_fracc)] = 0 
+
+# Add pesudo-count (1) to avoid taking the log of 0
+log_obs_abn = log(abundances(soil_class) + 1) 
+
+# Adjust the log observed abundances
+log_obs_abn_adj = t(t(log_obs_abn) - samp_fracc)
+
+
+df_fig1 = data.frame(res_class$beta * res_class$diff_abn, check.names = FALSE) %>% 
+  rownames_to_column("taxon_id")
+df_fig2 = data.frame(res_class$se * res_class$diff_abn, check.names = FALSE) %>% 
+  rownames_to_column("taxon_id")
+colnames(df_fig2)[-1] = paste0(colnames(df_fig2)[-1], "SD")
+df_fig = df_fig1 %>% left_join(df_fig2, by = "taxon_id") %>%
+  transmute(taxon_id, treatmentTR, treatmentTRSD) %>%
+  filter(treatmentTR != 0) %>% arrange(desc(treatmentTR)) %>% 
+  mutate(group = ifelse(treatmentTR > 0, "g1", "g2"))
+df_fig$taxon_id = factor(df_fig$taxon_id, levels = df_fig$taxon_id)
+dif_fig2 <- as.data.frame(tax_table(soil_class)) %>% rownames_to_column(var = "taxon_id") %>% right_join(df_fig, by = "taxon_id")
+dif_fig3 <- filter(dif_fig2, Class != "uncultured")
+
+p_class_soil = ggplot(data = dif_fig3, 
+           aes(x = reorder(Class, -treatmentTR), y = treatmentTR, fill = group)) + 
+  geom_bar(stat = "identity", width = 0.7, 
+           position = position_dodge(width = 0.4)) +
+  geom_errorbar(aes(ymin = treatmentTR - treatmentTRSD, ymax = treatmentTR + treatmentTRSD), width = 0.2,
+                position = position_dodge(0.05), color = "black") + 
+  labs(x = NULL, y = "Log fold change", 
+       title = "Waterfall Plot for the Management Effect") + 
+  theme_classic() + labs(fill = "Treatment") + 
+  scale_fill_manual(values = c("#137098", "#C3BD10"), 
+    labels = c("Traditional", "Cover crop")) +
+  theme(axis.title.y = element_text(size = 16),
+        legend.title = element_text(size = 15),
+        legend.text = element_text(size = 14),
+        plot.title = element_text(hjust = 0.5),
+        panel.grid.minor.y = element_blank(),
+        axis.text.x = element_text(angle = 60, hjust = 1),
+        plot.margin = margin(c(12,20,20,24)))
+```
+
+### Differential abundance testing ANCOM rhizosphere
+```{r}
+## family level ####
+### BT plants 
+
+rbt_family <- tax_glom(rhizosphere_bt, taxrank = "Family")
+
+out_family <- ancombc(phyloseq = rbt_family, formula = "treatment", 
+              p_adj_method = "holm", zero_cut = 0.90, lib_cut = 1000, 
+              group = "treatment", struc_zero = TRUE, neg_lb = TRUE, tol = 1e-5, 
+              max_iter = 100, conserve = TRUE, alpha = 0.05, global = TRUE)
+res_family <- out_family$res
+
+samp_fracf = out_family$samp_frac
+
+samp_fracf[is.na(samp_fracf)] = 0 
+
+# Add pesudo-count (1) to avoid taking the log of 0
+log_obs_abn = log(abundances(rbt_family) + 1) 
+
+# Adjust the log observed abundances
+log_obs_abn_adj = t(t(log_obs_abn) - samp_fracf)
+
+
+df_fig1 = data.frame(res_family$beta * res_family$diff_abn, check.names = FALSE) %>% 
+  rownames_to_column("taxon_id")
+df_fig2 = data.frame(res_family$se * res_family$diff_abn, check.names = FALSE) %>% 
+  rownames_to_column("taxon_id")
+colnames(df_fig2)[-1] = paste0(colnames(df_fig2)[-1], "SD")
+df_fig = df_fig1 %>% left_join(df_fig2, by = "taxon_id") %>%
+  transmute(taxon_id, treatmentTR, treatmentTRSD) %>%
+  filter(treatmentTR != 0) %>% arrange(desc(treatmentTR)) %>% 
+  mutate(group = ifelse(treatmentTR > 0, "g1", "g2"))
+df_fig$taxon_id = factor(df_fig$taxon_id, levels = df_fig$taxon_id)
+dif_fig2 <- as.data.frame(tax_table(rbt_family)) %>% rownames_to_column(var = "taxon_id") %>% right_join(df_fig, by = "taxon_id")
+dif_fig3_rbt_fam <- filter(dif_fig2, Family != "uncultured")
+view(dif_fig3_rbt_fam)
+
+p_fam_bt = ggplot(data = dif_fig3, 
+           aes(x = reorder(Family, -treatmentTR), y = treatmentTR, fill = group)) + 
+  geom_bar(stat = "identity", width = 0.7, 
+           position = position_dodge(width = 0.4)) +
+  geom_errorbar(aes(ymin = treatmentTR - treatmentTRSD, ymax = treatmentTR + treatmentTRSD), width = 0.2,
+                position = position_dodge(0.05), color = "black") + 
+  labs(x = NULL, y = "Log fold change", 
+       title = "Waterfall Plot for the Management Effect") + 
+  theme_classic() + labs(fill = "Treatment") + 
+  scale_fill_manual(values = c("#137098", "#C3BD10"), 
+    labels = c("Traditional", "Cover crop")) +
+  theme(axis.title.y = element_text(size = 16),
+        legend.title = element_text(size = 15),
+        legend.text = element_text(size = 14),
+        plot.title = element_text(hjust = 0.5),
+        panel.grid.minor.y = element_blank(),
+        axis.text.x = element_text(angle = 60, hjust = 1),
+        plot.margin = margin(c(12,20,20,24)))
+
+### iso plants 
+riso_family <- tax_glom(rhizosphere_iso, taxrank = "Family")
+
+out_family <- ancombc(phyloseq = riso_family, formula = "treatment", 
+              p_adj_method = "holm", zero_cut = 0.90, lib_cut = 1000, 
+              group = "treatment", struc_zero = TRUE, neg_lb = TRUE, tol = 1e-5, 
+              max_iter = 100, conserve = TRUE, alpha = 0.05, global = TRUE)
+res_family <- out_family$res
+
+samp_fracf = out_family$samp_frac
+
+samp_fracf[is.na(samp_fracf)] = 0 
+
+# Add pesudo-count (1) to avoid taking the log of 0
+log_obs_abn = log(abundances(riso_family) + 1) 
+
+# Adjust the log observed abundances
+log_obs_abn_adj = t(t(log_obs_abn) - samp_fracf)
+
+
+df_fig1 = data.frame(res_family$beta * res_family$diff_abn, check.names = FALSE) %>% 
+  rownames_to_column("taxon_id")
+df_fig2 = data.frame(res_family$se * res_family$diff_abn, check.names = FALSE) %>% 
+  rownames_to_column("taxon_id")
+colnames(df_fig2)[-1] = paste0(colnames(df_fig2)[-1], "SD")
+df_fig = df_fig1 %>% left_join(df_fig2, by = "taxon_id") %>%
+  transmute(taxon_id, treatmentTR, treatmentTRSD) %>%
+  filter(treatmentTR != 0) %>% arrange(desc(treatmentTR)) %>% 
+  mutate(group = ifelse(treatmentTR > 0, "g1", "g2"))
+df_fig$taxon_id = factor(df_fig$taxon_id, levels = df_fig$taxon_id)
+dif_fig2 <- as.data.frame(tax_table(riso_family)) %>% rownames_to_column(var = "taxon_id") %>% right_join(df_fig, by = "taxon_id")
+dif_fig3 <- filter(dif_fig2, Family != "uncultured")
+
+p_fam_iso = ggplot(data = dif_fig3, 
+           aes(x = reorder(Family, -treatmentTR), y = treatmentTR, fill = group)) + 
+  geom_bar(stat = "identity", width = 0.7, 
+           position = position_dodge(width = 0.4)) +
+  geom_errorbar(aes(ymin = treatmentTR - treatmentTRSD, ymax = treatmentTR + treatmentTRSD), width = 0.2,
+                position = position_dodge(0.05), color = "black") + 
+  labs(x = NULL, y = "Log fold change", 
+       title = "Waterfall Plot for the Management Effect") + 
+  theme_classic() + labs(fill = "Treatment") + 
+  scale_fill_manual(values = c("#137098", "#C3BD10"), 
+    labels = c("Traditional", "Cover crop")) +
+  theme(axis.title.y = element_text(size = 16),
+        legend.title = element_text(size = 15),
+        legend.text = element_text(size = 14),
+        plot.title = element_text(hjust = 0.5),
+        panel.grid.minor.y = element_blank(),
+        axis.text.x = element_text(angle = 60, hjust = 1),
+        plot.margin = margin(c(12,20,20,24)))
+
+### ASV level
+ #BT corn
+### BT plants 
+
+
+out <- ancombc(phyloseq = rhizosphere_bt, formula = "treatment", 
+              p_adj_method = "holm", zero_cut = 0.90, lib_cut = 1000, 
+              group = "treatment", struc_zero = TRUE, neg_lb = TRUE, tol = 1e-5, 
+              max_iter = 100, conserve = TRUE, alpha = 0.05, global = TRUE)
+res <- out$res
+
+samp_frac = out$samp_frac
+
+samp_frac[is.na(samp_frac)] = 0 
+
+# Add pesudo-count (1) to avoid taking the log of 0
+log_obs_abn = log(abundances(rhizosphere_bt) + 1) 
+
+# Adjust the log observed abundances
+log_obs_abn_adj = t(t(log_obs_abn) - samp_frac)
+
+
+df_fig1 = data.frame(res$beta * res$diff_abn, check.names = FALSE) %>% 
+  rownames_to_column("taxon_id")
+df_fig2 = data.frame(res$se * res$diff_abn, check.names = FALSE) %>% 
+  rownames_to_column("taxon_id")
+colnames(df_fig2)[-1] = paste0(colnames(df_fig2)[-1], "SD")
+df_fig = df_fig1 %>% left_join(df_fig2, by = "taxon_id") %>%
+  transmute(taxon_id, treatmentTR, treatmentTRSD) %>%
+  filter(treatmentTR != 0) %>% arrange(desc(treatmentTR)) %>% 
+  mutate(group = ifelse(treatmentTR > 0, "g1", "g2"))
+df_fig$taxon_id = factor(df_fig$taxon_id, levels = df_fig$taxon_id)
+dif_fig2 <- as.data.frame(tax_table(rhizosphere_bt)) %>% rownames_to_column(var = "taxon_id") %>% right_join(df_fig, by = "taxon_id")
+dif_fig3_rbt <- filter(dif_fig2, Family != "uncultured")
+view(dif_fig3_rbt)
+p_bt = ggplot(data = dif_fig3_rbt, 
+           aes(x = reorder(Genus, -treatmentTR), y = treatmentTR, fill = group)) + 
+  geom_bar(stat = "identity", width = 0.7, 
+           position = position_dodge(width = 0.4)) +
+  geom_errorbar(aes(ymin = treatmentTR - treatmentTRSD, ymax = treatmentTR + treatmentTRSD), width = 0.2,
+                position = position_dodge(0.05), color = "black") + 
+  labs(x = NULL, y = "Log fold change", 
+       title = "Waterfall Plot for the Management Effect") + 
+  theme_classic() + labs(fill = "Treatment") + 
+  scale_fill_manual(values = c("#137098", "#C3BD10"), 
+    labels = c("Traditional", "Cover crop")) +
+  theme(axis.title.y = element_text(size = 16),
+        legend.title = element_text(size = 15),
+        legend.text = element_text(size = 14),
+        plot.title = element_text(hjust = 0.5),
+        panel.grid.minor.y = element_blank(),
+        axis.text.x = element_text(angle = 60, hjust = 1),
+        plot.margin = margin(c(12,20,20,24)))
+
+## Isoline plants
+out <- ancombc(phyloseq = rhizosphere_iso, formula = "treatment", 
+              p_adj_method = "holm", zero_cut = 0.90, lib_cut = 1000, 
+              group = "treatment", struc_zero = TRUE, neg_lb = TRUE, tol = 1e-5, 
+              max_iter = 100, conserve = TRUE, alpha = 0.05, global = TRUE)
+res <- out$res
+
+samp_frac = out$samp_frac
+
+samp_frac[is.na(samp_frac)] = 0 
+
+# Add pesudo-count (1) to avoid taking the log of 0
+log_obs_abn = log(abundances(rhizosphere_iso) + 1) 
+
+# Adjust the log observed abundances
+log_obs_abn_adj = t(t(log_obs_abn) - samp_frac)
+
+
+df_fig1 = data.frame(res$beta * res$diff_abn, check.names = FALSE) %>% 
+  rownames_to_column("taxon_id")
+df_fig2 = data.frame(res$se * res$diff_abn, check.names = FALSE) %>% 
+  rownames_to_column("taxon_id")
+colnames(df_fig2)[-1] = paste0(colnames(df_fig2)[-1], "SD")
+df_fig = df_fig1 %>% left_join(df_fig2, by = "taxon_id") %>%
+  transmute(taxon_id, treatmentTR, treatmentTRSD) %>%
+  filter(treatmentTR != 0) %>% arrange(desc(treatmentTR)) %>% 
+  mutate(group = ifelse(treatmentTR > 0, "g1", "g2"))
+df_fig$taxon_id = factor(df_fig$taxon_id, levels = df_fig$taxon_id)
+dif_fig2 <- as.data.frame(tax_table(rhizosphere_iso)) %>% rownames_to_column(var = "taxon_id") %>% right_join(df_fig, by = "taxon_id")
+dif_fig3_riso <- filter(dif_fig2, Family != "uncultured")
+view(dif_fig3_riso)
+
+p_iso = ggplot(data = dif_fig3_riso, 
+           aes(x = reorder(Family, -treatmentTR), y = treatmentTR, fill = group)) + 
+  geom_bar(stat = "identity", width = 0.7, 
+           position = position_dodge(width = 0.4)) +
+  geom_errorbar(aes(ymin = treatmentTR - treatmentTRSD, ymax = treatmentTR + treatmentTRSD), width = 0.2,
+                position = position_dodge(0.05), color = "black") + 
+  labs(x = NULL, y = "Log fold change", 
+       title = "Waterfall Plot for the Management Effect") + 
+  theme_classic() + labs(fill = "Treatment") + 
+  scale_fill_manual(values = c("#137098", "#C3BD10"), 
+    labels = c("Traditional", "Cover crop")) +
+  theme(axis.title.y = element_text(size = 16),
+        legend.title = element_text(size = 15),
+        legend.text = element_text(size = 14),
+        plot.title = element_text(hjust = 0.5),
+        panel.grid.minor.y = element_blank(),
+        axis.text.x = element_text(angle = 60, hjust = 1),
+        plot.margin = margin(c(12,20,20,24)))
+
+
+both_dif_abund <- dif_fig3_rbt %>% 
+  inner_join(dif_fig3_riso, by = 'OTU')
+view(both_dif_abund)
+
+both_dif_abund2 <- both_dif_abund %>%
+  mutate(direction = treatmentTR.x * treatmentTR.y) %>% 
+  filter(direction >= 0)
+view(both_dif_abund2)
+
+
+both_dif_bt <- both_dif_abund2 %>% 
+  select(,1:12)
+both_dif_iso <- both_dif_abund2 %>% 
+  select(,13:24)
+
+both_dif_bt$corn <- c("Bt")
+both_dif_iso$corn <- c("Iso")
+both_dif_bt2 <- both_dif_bt %>% select(-OTU)
+both_dif_iso2 <- both_dif_iso %>% select(-direction)
+colnames(both_dif_bt2) <- colnames(both_dif_iso2) 
+
+both_dif_abund3 <- rbind(both_dif_bt2, both_dif_iso2)
+
+both_dif_abund4 <- both_dif_abund3
+view(both_dif_abund4)
+both_dif_abund4 <- both_dif_abund4 %>% mutate_all(na_if,"")
+both_dif_abund4 = subset(both_dif_abund4, !is.na(Genus.y))
+# Phylum order
+x = tapply(both_dif_abund4$treatmentTR.y, both_dif_abund4$Phylum.y, function(x) max(x))
+x = sort(x, TRUE)
+both_dif_abund4$Phylum.y = factor(as.character(both_dif_abund4$Phylum.y), levels=names(x))
+# Genus order
+x = tapply(both_dif_abund4$treatmentTR.y, both_dif_abund4$Genus.y, function(x) max(x))
+x = sort(x, TRUE)
+both_dif_abund4$Genus.y = factor(as.character(both_dif_abund4$Genus.y), levels=names(x))
+bda_fig <- ggplot(both_dif_abund4, aes(y=Genus.y, x=treatmentTR.y, color=Class.y, shape = corn)) + 
+  geom_vline(xintercept = 0.0, color = "gray", size = 0.5) +
+  geom_point(size=6) + labs(x = NULL, y = "Genus", color = "Class", shape = "Corn line") + scale_shape_discrete(labels = c("Bt", "non-Bt")) +
+  theme(axis.text.x = element_text(angle = -90, hjust = 0, vjust=0.5),
+        plot.margin = margin(5,5,5,5)) +
+  scale_color_manual(values = c("#78a1bb", "#a3b18a",  "#37505c", "#113537","#96616b", 
+                               "#283044",  "#63474d", "#ffead0", "#4a4238", "#C7CB85",
+                               "#508484", "#454372","#502419", "#70877F", "#2F2963",
+                               "#C4A77D","#4d5359","#7EA172",  "#BFCBC2", "#3B3561",
+                               "#63474d", "#ef946c", "#C08497"))
+ggsave("/Users/PaddockK/Documents/Projects/Cover_crop/cover_crop_git/Figs/221220_diff_abund_overlap_rhizo.pdf", dpi = 300, width = 7, height =10)
+```
+
+### Heatmap 
+```{r}
+## Rhizosphere samples separate top 125
+SVs <- otu_table(rhizosphere)
+
+taxonomy <- rownames_to_column(as.data.frame(tax_table(rhizosphere)), var = "Feature.ID")
+samp_meta <- rownames_to_column(sample_rhizo2, var ="SampleID")
+
+SVs<-apply(SVs, 2, function(x) x/sum(x)*100) #convert to percent
+view(SVs)
+SVsToPlot<-  
+  data.frame(MeanAbundance=rowMeans(SVs)) %>% #find the average abundance of a SV
+  rownames_to_column("Feature.ID") %>%
+  arrange(desc(MeanAbundance)) %>%
+  top_n(125, MeanAbundance) %>%
+  pull(Feature.ID) #extract only the names from the table
+
+SVs %>%
+  as.data.frame() %>%
+  rownames_to_column("Feature.ID") %>%
+  gather(-Feature.ID, key="SampleID", value="Abundance") %>%
+  mutate(Feature.ID=if_else(Feature.ID %in% SVsToPlot,  Feature.ID, "Remainder")) %>% #flag features to be collapsed
+  group_by(SampleID, Feature.ID) %>%
+  summarise(Abundance=sum(Abundance)) %>%
+  left_join(samp_meta) %>%
+  mutate(NormAbundance=log10(Abundance+0.01)) %>% # do a log10 transformation after adding a 0.01% pseudocount. Could also add 1 read before transformation to percent
+  left_join(taxonomy) %>%
+  mutate(Feature=paste(Feature.ID)) %>%
+  mutate(Feature=paste(Class, Feature.ID)) %>%
+  drop_na(Phylum) %>% 
+  ggplot(aes(x=SampleID, y=Feature, fill=NormAbundance)) +
+  geom_tile() +
+  facet_grid(~`treat_corn`, scales="free_x", space = "free_x") +
+  theme_q2r() +
+  theme(axis.text.x=element_text(angle=90, vjust=0.5, hjust = 1),
+        axis.text.y=element_text(size = 2)) +
+  scale_fill_viridis_c(option = "plasma", name="log10(% Ab)")
+
+
+### Differentially abundant taxa between treatments
+rhizo_taxa_list <- rbind(dif_fig3_riso, dif_fig3_rbt)
+rhizo_hit_list <- as.vector(rhizo_taxa_list$taxon_id)
+filtered_svs <- as.data.frame(otu_table(rhizosphere)) %>% rownames_to_column(var = "asv_id") %>% filter(asv_id %in% rhizo_hit_list)
+filtered_svs <- column_to_rownames(filtered_svs, var = "asv_id")
+top_125_svs <- head(filtered_svs, 125)
+
+taxonomy <- rownames_to_column(as.data.frame(tax_table(rhizosphere)), var = "Feature.ID") %>% filter(Feature.ID %in% rhizo_hit_list)
+samp_meta <- rownames_to_column(sample_rhizo2, var ="SampleID")
+
+SVs<-apply(filtered_svs, 2, function(x) x/sum(x)*100) #convert to percent
+view(head(SVs, 125))
+
+SVsToPlot<-  
+  data.frame(MeanAbundance=rowMeans(SVs)) %>% #find the average abundance of a SV
+  rownames_to_column("Feature.ID") %>%
+  arrange(desc(MeanAbundance)) %>%
+  top_n(125, MeanAbundance) %>%
+  pull(Feature.ID) #extract only the names from the table
+
+SVs %>%
+  as.data.frame() %>%
+  rownames_to_column("Feature.ID") %>%
+  gather(-Feature.ID, key="SampleID", value="Abundance") %>%
+  mutate(Feature.ID=if_else(Feature.ID %in% SVsToPlot,  Feature.ID, "Remainder")) %>% #flag features to be collapsed
+  group_by(SampleID, Feature.ID) %>%
+  summarise(Abundance=sum(Abundance)) %>%
+  left_join(samp_meta) %>%
+  mutate(NormAbundance=log10(Abundance+0.01)) %>% # do a log10 transformation after adding a 0.01% pseudocount. Could also add 1 read before transformation to percent
+  left_join(taxonomy) %>%
+  mutate(Feature=paste(Feature.ID)) %>%
+  mutate(Feature=paste(Phylum, Feature.ID)) %>%
+  drop_na(Phylum) %>% 
+  ggplot(aes(x=SampleID, y=Feature, fill=NormAbundance)) +
+  geom_tile() +
+  facet_grid(~`treat_corn`, scales="free_x", space = "free_x") +
+  theme_q2r() +
+  theme(axis.text.x=element_text(angle=90, vjust=0.5, hjust = 1),
+        axis.text.y=element_text(size = 2)) +
+  scale_fill_viridis_c(option = "plasma", name="log10(% Ab)")
+
+
+### Second attempt ave abund in rhizosphere
+SVs <- otu_table(rhizosphere)
+
+taxonomy <- rownames_to_column(as.data.frame(tax_table(rhizosphere)), var = "Feature.ID") %>% filter(Feature.ID %in% rhizo_hit_list)
+samp_meta <- rownames_to_column(sample_rhizo2, var ="SampleID")
+
+SVs<-apply(SVs, 2, function(x) x/sum(x)*100) #convert to percent
+
+
+SVsToPlot<-  
+  data.frame(top_125_svs) %>% #find the average abundance of a SV
+  rownames_to_column("Feature.ID") %>%
+  pull(Feature.ID) #extract only the names from the table
+
+SVs %>%
+  as.data.frame() %>%
+  rownames_to_column("Feature.ID") %>%
+  gather(-Feature.ID, key="SampleID", value="Abundance") %>%
+  mutate(Feature.ID=if_else(Feature.ID %in% SVsToPlot,  Feature.ID, "Remainder")) %>% #flag features to be collapsed
+  group_by(SampleID, Feature.ID) %>%
+  summarise(Abundance=sum(Abundance)) %>%
+  left_join(samp_meta) %>%
+  mutate(NormAbundance=log10(Abundance+0.01)) %>% # do a log10 transformation after adding a 0.01% pseudocount. Could also add 1 read before transformation to percent
+  left_join(taxonomy) %>%
+  mutate(Feature=paste(Feature.ID)) %>%
+  mutate(Feature=paste(Phylum, Feature.ID)) %>%
+  drop_na(Phylum) %>% 
+  ggplot(aes(x=SampleID, y=Feature, fill=NormAbundance)) +
+  geom_tile() +
+  facet_grid(~`treat_corn`, scales="free_x", space = "free_x") +
+  theme_q2r() +
+  theme(axis.text.x=element_text(angle=90, vjust=0.5, hjust = 1),
+        axis.text.y=element_text(size = 2)) +
+  scale_fill_viridis_c(option = "plasma", name="log10(% Ab)")
+
+top_125_svs_tax <- top_125_svs %>% 
+  rownames_to_column(var = "Feature.ID") %>% 
+  left_join(rownames_to_column(as.data.frame(tax_table(rhizosphere)), var = "Feature.ID"), by = "Feature.ID")
+
+class_to_plot <- top_125_svs_tax %>% select(Class) %>% unique()
+phylum_to_plot <- top_125_svs_tax %>% select(Phylum) %>% unique()
+```
+
+## Proportion of soil reads in rhizospheres
+```{r}
+### Type x treatment x corn ####
+bulk_soil_cc_prev2 #12,015
+bulk_soil_tr_prev2 #12,705
+
+rhizosphere_cc_bt_prev2 #11,890
+rhizosphere_cc_iso_prev2 #10,027
+
+rhizosphere_tr_bt_prev2 #9,326
+rhizosphere_tr_iso_prev2 #10,094
+
+## What is present in the cc soil and cc bt rhizo
+soil_cc_bt <- rhizosphere_cc_bt_prev2 %>% 
+  inner_join(bulk_soil_cc_prev2, by = "OTU")
+
+soil_cc_bt_count <- (580/12015)*100
+rhizo_cc_bt_prop <-apply(otu_table(rhizosphere_cc_bt), 2, function(x) x/sum(x)*100) #convert to percent
+rhizo_cc_bt_prop2 <- rhizo_cc_bt_prop %>% 
+  as.data.frame() %>% 
+  rownames_to_column(var = "OTU") %>% 
+  right_join(soil_cc_bt, by = "OTU")
+rhizo_cc_bt_prop_totals <- data.frame(colSums(rhizo_cc_bt_prop2[,2:37]))
+colnames(rhizo_cc_bt_prop_totals) <- "percent_total"
+ave_percent_total_cc_bt <- rhizo_cc_bt_prop_totals %>% 
+  dplyr::summarise(mean_percent = mean(percent_total, na.rm = TRUE),
+                   sd = std.error(percent_total, na.rm = TRUE))
+  
+
+
+## What is present in the cc soil and cc iso rhizo
+soil_cc_iso <- rhizosphere_cc_iso_prev2 %>% 
+  inner_join(bulk_soil_cc_prev2, by = "OTU")
+
+soil_cc_iso_count <- (553/12015)*100
+rhizo_cc_iso_prop <-apply(otu_table(rhizosphere_cc_iso), 2, function(x) x/sum(x)*100) #convert to percent
+rhizo_cc_iso_prop2 <- rhizo_cc_iso_prop %>% 
+  as.data.frame() %>% 
+  rownames_to_column(var = "OTU") %>% 
+  right_join(soil_cc_iso, by = "OTU")
+rhizo_cc_iso_prop_totals <- data.frame(colSums(rhizo_cc_iso_prop2[,2:37]))
+colnames(rhizo_cc_iso_prop_totals) <- "percent_total"
+ave_percent_total_cc_iso <- rhizo_cc_iso_prop_totals %>% 
+  dplyr::summarise(mean_percent = mean(percent_total, na.rm = TRUE),
+                   sd = std.error(percent_total, na.rm = TRUE))
+
+
+## What is present in the tr soil and tr bt rhizo
+soil_tr_bt <- rhizosphere_tr_bt_prev2 %>% 
+  inner_join(bulk_soil_tr_prev2, by = "OTU")
+
+soil_tr_bt_count <- (513/12705)*100
+rhizo_tr_bt_prop <-apply(otu_table(rhizosphere_tr_bt), 2, function(x) x/sum(x)*100) #convert to percent
+rhizo_tr_bt_prop2 <- rhizo_tr_bt_prop %>% 
+  as.data.frame() %>% 
+  rownames_to_column(var = "OTU") %>% 
+  right_join(soil_tr_bt, by = "OTU")
+rhizo_tr_bt_prop_totals <- data.frame(colSums(rhizo_tr_bt_prop2[,2:37]))
+colnames(rhizo_tr_bt_prop_totals) <- "percent_total"
+ave_percent_total_tr_bt <- rhizo_tr_bt_prop_totals %>% 
+  dplyr::summarise(mean_percent = mean(percent_total, na.rm = TRUE),
+                   sd = std.error(percent_total, na.rm = TRUE))
+
+## What is present in the tr soil and tr iso rhizo
+soil_tr_iso <- rhizosphere_tr_iso_prev2 %>% 
+  inner_join(bulk_soil_tr_prev2, by = "OTU")
+
+soil_tr_iso_count <- (526/12705)*100
+rhizo_tr_iso_prop <-apply(otu_table(rhizosphere_tr_iso), 2, function(x) x/sum(x)*100) #convert to percent
+rhizo_tr_iso_prop2 <- rhizo_tr_iso_prop %>% 
+  as.data.frame() %>% 
+  rownames_to_column(var = "OTU") %>% 
+  right_join(soil_tr_iso, by = "OTU")
+rhizo_tr_iso_prop_totals <- data.frame(colSums(rhizo_tr_iso_prop2[,2:37]))
+colnames(rhizo_tr_iso_prop_totals) <- "percent_total"
+ave_percent_total_tr_iso <- rhizo_tr_iso_prop_totals %>% 
+  dplyr::summarise(mean_percent = mean(percent_total, na.rm = TRUE),
+                   sd = std.error(percent_total, na.rm = TRUE))
+
+
+
+
+## Diving further ####
+bulk_soil_cc_reps <- phyloseq_sep_variable(bulk_soil_cc, variable = "Rep")
+bulk_soil_tr_reps <- phyloseq_sep_variable(bulk_soil_tr, variable = "Rep")
+
+rhizosphere_cc_bt_reps <- phyloseq_sep_variable(rhizosphere_cc_bt, variable = "Rep")
+rhizosphere_cc_iso_reps <- phyloseq_sep_variable(rhizosphere_cc_iso, variable = "Rep")
+rhizosphere_tr_bt_reps <- phyloseq_sep_variable(rhizosphere_tr_bt, variable = "Rep")
+rhizosphere_tr_iso_reps <- phyloseq_sep_variable(rhizosphere_tr_iso, variable = "Rep")
+
+
+bulk_soil_cc_reps1_pv <- prevalence_table(bulk_soil_cc_reps$`1`)
+bulk_soil_cc_reps2_pv <- prevalence_table(bulk_soil_cc_reps$`2`)
+bulk_soil_cc_reps3_pv <- prevalence_table(bulk_soil_cc_reps$`3`)
+
+bulk_soil_tr_reps1_pv <- prevalence_table(bulk_soil_tr_reps$`1`)
+bulk_soil_tr_reps2_pv <- prevalence_table(bulk_soil_tr_reps$`2`)
+bulk_soil_tr_reps3_pv <- prevalence_table(bulk_soil_tr_reps$`3`)
+
+rhizosphere_cc_bt_reps1_pv <- prevalence_table(rhizosphere_cc_bt_reps$`1`)
+rhizosphere_cc_bt_reps2_pv <- prevalence_table(rhizosphere_cc_bt_reps$`2`)
+rhizosphere_cc_bt_reps3_pv <- prevalence_table(rhizosphere_cc_bt_reps$`3`)
+
+rhizosphere_cc_iso_reps1_pv <- prevalence_table(rhizosphere_cc_iso_reps$`1`)
+rhizosphere_cc_iso_reps2_pv <- prevalence_table(rhizosphere_cc_iso_reps$`2`)
+rhizosphere_cc_iso_reps3_pv <- prevalence_table(rhizosphere_cc_iso_reps$`3`)
+
+rhizosphere_tr_bt_reps1_pv <- prevalence_table(rhizosphere_tr_bt_reps$`1`)
+rhizosphere_tr_bt_reps2_pv <- prevalence_table(rhizosphere_tr_bt_reps$`2`)
+rhizosphere_tr_bt_reps3_pv <- prevalence_table(rhizosphere_tr_bt_reps$`3`)
+
+rhizosphere_tr_iso_reps1_pv <- prevalence_table(rhizosphere_tr_iso_reps$`1`)
+rhizosphere_tr_iso_reps2_pv <- prevalence_table(rhizosphere_tr_iso_reps$`2`)
+rhizosphere_tr_iso_reps3_pv <- prevalence_table(rhizosphere_tr_iso_reps$`3`)
+
+## What is present in the cc soil and cc bt rhizo
+soil_cc_bt1 <- rhizosphere_cc_bt_reps1_pv %>% 
+  inner_join(bulk_soil_cc_reps1_pv, by = "OTU")
+soil_cc_bt1_count <- (220/5282)
+
+soil_cc_bt2 <- rhizosphere_cc_bt_reps2_pv %>% 
+  inner_join(bulk_soil_cc_reps2_pv, by = "OTU")
+soil_cc_bt2_count <- (208/4875)
+
+soil_cc_bt3 <- rhizosphere_cc_bt_reps3_pv %>% 
+  inner_join(bulk_soil_cc_reps3_pv, by = "OTU")
+soil_cc_bt3_count <- (268/5271)
+
+## What is present in the cc soil and cc iso rhizo
+soil_cc_iso1 <- rhizosphere_cc_iso_reps1_pv %>% 
+  inner_join(bulk_soil_cc_reps1_pv, by = "OTU")
+soil_cc_iso1_count <- (197/5282)
+
+soil_cc_iso2 <- rhizosphere_cc_iso_reps2_pv %>% 
+  inner_join(bulk_soil_cc_reps2_pv, by = "OTU")
+soil_cc_iso2_count <- (205/4875)
+
+soil_cc_iso3 <- rhizosphere_cc_iso_reps3_pv %>% 
+  inner_join(bulk_soil_cc_reps3_pv, by = "OTU")
+soil_cc_iso3_count <- (252/5271)
+
+## What is present in the tr soil and cc iso rhizo
+soil_tr_iso1 <- rhizosphere_tr_iso_reps1_pv %>% 
+  inner_join(bulk_soil_tr_reps1_pv, by = "OTU")
+soil_tr_iso1_count <- (208/5950)
+
+soil_tr_iso2 <- rhizosphere_tr_iso_reps2_pv %>% 
+  inner_join(bulk_soil_tr_reps2_pv, by = "OTU")
+soil_tr_iso2_count <- (230/5165)
+
+soil_tr_iso3 <- rhizosphere_tr_iso_reps3_pv %>% 
+  inner_join(bulk_soil_tr_reps3_pv, by = "OTU")
+soil_tr_iso3_count <- (190/5381)
+
+## What is present in the tr soil and cc bt rhizo
+soil_tr_bt1 <- rhizosphere_tr_bt_reps1_pv %>% 
+  inner_join(bulk_soil_tr_reps1_pv, by = "OTU")
+soil_tr_bt1_count <- (191/5950)
+
+soil_tr_bt2 <- rhizosphere_tr_bt_reps2_pv %>% 
+  inner_join(bulk_soil_tr_reps2_pv, by = "OTU")
+soil_tr_bt2_count <- (213/5165)
+
+soil_tr_bt3 <- rhizosphere_tr_bt_reps3_pv %>% 
+  inner_join(bulk_soil_tr_reps3_pv, by = "OTU")
+soil_tr_bt3_count <- (197/5381)
+
+pv_counts <- data.frame(soil_cc_bt1_count, soil_cc_bt2_count, soil_cc_bt3_count, soil_cc_iso1_count, soil_cc_iso2_count, soil_cc_iso3_count, soil_tr_iso1_count, soil_tr_iso2_count, soil_tr_iso3_count, soil_tr_bt1_count, soil_tr_bt2_count, soil_tr_bt3_count)
+pv_counts2 <- as.data.frame(t(pv_counts)) %>% rownames_to_column(var = "sample")
+pv_counts2$treatment <- as.factor(c("CC","CC","CC","CC","CC","CC","TR","TR","TR","TR","TR","TR"))
+pv_counts2$corn <-  as.factor(c("BT","BT","BT","Iso","Iso","Iso","BT","BT","BT","Iso","Iso","Iso"))
+
+
+propmod <- betareg(V1 ~ treatment * corn, data = pv_counts2)
+summary(propmod)
+contrasts(propmod)
+propmod2 <- betareg(V1 ~ treatment, data = pv_counts2)
+summary(propmod2)
+
+```
+
+## Proportion of soil/rhizo reads in wcr
+```{r}
+insect_cc <- subset_samples(insect, treatment == "CC")
+sum(taxa_sums(insect_cc) == 0)
+insect_cc <- prune_taxa(taxa_sums(insect_cc) > 0, insect_cc)
+insect_cc_pv <- prevalence_table(insect_cc)
+
+insect_cc_bt <- subset_samples(insect_cc, corn_trait == "BT")
+sum(taxa_sums(insect_cc_bt) == 0)
+insect_cc_bt <- prune_taxa(taxa_sums(insect_cc_bt) > 0, insect_cc_bt)
+insect_cc_bt_pv <- prevalence_table(insect_cc_bt)
+
+sri_cc_bt <- insect_cc_bt_pv %>% 
+  inner_join(soil_cc_bt, by = "OTU")
+
+
+insect_cc_iso <- subset_samples(insect_cc, corn_trait == "Iso")
+sum(taxa_sums(insect_cc_iso) == 0)
+insect_cc_iso <- prune_taxa(taxa_sums(insect_cc_iso) > 0, insect_cc_iso)
+insect_cc_iso_pv <- prevalence_table(insect_cc_iso)
+
+sri_cc_iso <- insect_cc_iso_pv %>% 
+  inner_join(soil_cc_iso, by = "OTU")
+
+
+
+insect_tr <- subset_samples(insect, treatment == "TR")
+sum(taxa_sums(insect_tr) == 0)
+insect_tr <- prune_taxa(taxa_sums(insect_tr) > 0, insect_tr)
+insect_tr_pv <- prevalence_table(insect_tr)
+
+insect_tr_bt <- subset_samples(insect_tr, corn_trait == "BT")
+sum(taxa_sums(insect_tr_bt) == 0)
+insect_tr_bt <- prune_taxa(taxa_sums(insect_tr_bt) > 0, insect_tr_bt)
+insect_tr_bt_pv <- prevalence_table(insect_tr_bt)
+
+sri_tr_bt <- insect_tr_bt_pv %>% 
+  inner_join(soil_tr_bt, by = "OTU")
+
+
+insect_tr_iso <- subset_samples(insect_cc, corn_trait == "Iso")
+sum(taxa_sums(insect_tr_iso) == 0)
+insect_tr_iso <- prune_taxa(taxa_sums(insect_tr_iso) > 0, insect_tr_iso)
+insect_tr_iso_pv <- prevalence_table(insect_tr_iso)
+
+sri_tr_iso <- insect_tr_iso_pv %>% 
+  inner_join(soil_tr_iso, by = "OTU")
+```
+
