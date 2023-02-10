@@ -1354,6 +1354,7 @@ samp_fig2 <- phylum_plot + geom_bar(aes(), stat="identity", position="stack", wi
 samp_fig2
 
 ggsave("/Users/PaddockK/Documents/Projects/Cover_crop/cover_crop_git/Figs/220117_type_bar_plot.pdf", dpi = 300, width = 24, height = 6)
+ggsave("/Users/PaddockK/Documents/Projects/Cover_crop/cover_crop_git/Figs/220117_type_bar_plot.svg", dpi = 300, width = 24, height = 6)
 ```
 ### Differential abundance testing ANCOM soil
 ```{r}

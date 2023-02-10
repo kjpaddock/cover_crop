@@ -30,6 +30,7 @@ library("cowplot")
 library("metagMisc")
 library("betareg")
 
+
 nonbact_filter <- function(phylo_data) {
 bdf <- subset_taxa(phylo_data, (Order!="Chloroplast") | is.na(Order)) # 48 taxa
 bdf2 <- subset_taxa(bdf, (Family!="Mitochondria") | is.na(Family)) # 41 taxa
