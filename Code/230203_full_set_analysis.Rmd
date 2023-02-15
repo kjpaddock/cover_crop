@@ -155,6 +155,8 @@ obs_type_plot <- ggplot(FittedMeans.typetreat.obs2, aes(x=type, y = emmean, fill
     axis.title.y = element_text(size = 18, margin = margin(r = 20)),
     axis.text = element_text(size = 14))
 
+fig_leg <- get_legend(obs_type_plot)
+
 obs_type_plot
 #### No inoculum ####
 bd4_div_full_noinoc <- bd4_div_full2 %>% 
@@ -1346,14 +1348,14 @@ samp_fig2 <- phylum_plot + geom_bar(aes(), stat="identity", position="stack", wi
         axis.ticks.x = element_blank(),
         axis.title.x = element_blank(),
         axis.title.y = element_text(size = 18, vjust = 2),
-        plot.margin = margin(30,30,30,30),
+        plot.margin = margin(80,80,30,30),
         legend.text = element_text(size = 12),
         legend.title = element_text(size = 15), 
         strip.text.x = element_text(size = 15))
 
 samp_fig2
 
-ggsave("/Users/PaddockK/Documents/Projects/Cover_crop/cover_crop_git/Figs/220117_type_bar_plot.pdf", dpi = 300, width = 24, height = 6)
+ggsave("/Users/PaddockK/Documents/Projects/Cover_crop/cover_crop_git/Figs/230217_type_bar_plot.pdf", dpi = 300, width = 24, height = 6)
 ggsave("/Users/PaddockK/Documents/Projects/Cover_crop/cover_crop_git/Figs/220117_type_bar_plot.svg", dpi = 300, width = 24, height = 6)
 ```
 ### Differential abundance testing ANCOM soil

@@ -8,7 +8,7 @@ output: html_document
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = FALSE)
 setwd("/Users/PaddockK/Documents/Projects/Cover_crop/cover_crop_git/")
-source('220310_microbe_functions.R')
+source('Code/220310_microbe_functions.R')
 ```
 
 ##Summary
@@ -49,6 +49,10 @@ plot(fit.emm.treat)
 fit.emm.trait <- (emmeans(aov.fit.mod.sqrt, pairwise ~ corn_trait|colony))
 fit.emm.trait2 <- as.data.frame(emmeans(aov.fit.mod.sqrt, pairwise ~ corn_trait|colony))
 plot(fit.emm.trait)
+fit.emm.threeway <- emmeans(aov.fit.mod.sqrt, pairwise ~ corn_trait|treatment|colony)
+
+
+
 fit.emm.trait.df <- data.frame(colony = c("Sus", "Sus", "Res", "Res"),
                                corn_trait = c("Bt", "non-Bt", "Bt", "non-Bt"),
                                emmean = c(0.149, 0.300, 0.311, 0.339),
@@ -320,9 +324,46 @@ weight.plot.bar.sus <-
 
 ggsave("/Users/PaddockK/Documents/Projects/Cover_crop/cover_crop_git/Data/Fitness/230203_dry_weight_bar_sus_pattern.pdf", dpi = 300, width = 12, height = 7)
 
+fig_leg2 <- get_legend(weight.plot.bar.sus)
+ggsave(plot = fig_leg2, "/Users/PaddockK/Documents/Projects/Cover_crop/cover_crop_git/Figs/fig_legend.pdf", dpi = 300, width = 5, height = 3)
 
+sum.weight.sus$order_value2 <- c(1,1.85,3.35,4.2)
 
-
+weight.plot.bar.sus2 <-
+  ggplot(aes(x = order_value2, y = mean_weight, fill = treatment, pattern = corn_trait), data = sum.weight.sus) +
+  scale_fill_manual(values = c("#C3BD10", "#137098"), labels = c("Conservation", "Conventional")) +
+  geom_bar_pattern(width=0.75, position = position_dodge(width = .9), stat = "identity",
+                   color = "black", 
+                   pattern_fill = "black",
+                   pattern_angle = 45,
+                   pattern_density = 0.1,
+                   pattern_spacing = 0.025,
+                   pattern_key_scale_factor = 0.6) + 
+  scale_pattern_manual(values = c(BT = "stripe", ISO = "none"), labels = c("Bt", "non-Bt")) +
+  geom_errorbar(aes(ymin=mean_weight-sd, ymax=mean_weight+sd), width=0.07, position = position_dodge(0.9)) +
+ labs(x = NULL, 
+      y = expression(paste("Average larval weight (g)\n(square root transformed)")), 
+      fill = "Treatment", 
+      pattern = "Corn type") + 
+  guides(pattern = guide_legend(override.aes = list(fill = "white"), order = 2),
+         fill = guide_legend(override.aes = list(pattern = "none"), order = 1)) +
+ scale_y_continuous(expand = c(0, 0), limits = c(0, 0.125)) +
+  #facet_wrap(~colony, scales = "fixed",labeller = labeller(colony = supp.labs)) +
+  #geom_segment(aes(x = 1.575, xend = 3.775, y = 0.118, yend = 0.118), inherit.aes = FALSE) +
+  #  geom_text(aes(x = 2.65, y = 0.1195, label = "***"), inherit.aes = FALSE) +
+  theme_classic() +  ggtitle("Susceptible") +
+  theme(
+    plot.title = element_text(size = 30, vjust = 5, hjust = 0.5),
+    strip.text.x = element_text(size = 26),
+    legend.title = element_text(size = 24),
+    axis.ticks.x = element_blank(),
+    legend.text = element_text(size = 20),
+    axis.title.x = element_text(size = 24, margin = margin(t = 20)),
+    axis.title.y = element_text(size = 24, margin = margin(r = 30)),
+    plot.margin = margin(t = 1, r = 1, b = 1, l = 1.5, "cm"),
+    axis.text.x = element_blank(),
+    axis.text.y = element_text(size = 20),
+    strip.background = element_rect(fill = "#DEDEDE"))
 ## Resistant insects
 
 sum.weight.res <- fit.dat.wcr2 %>% filter(colony == "RES") %>% 
@@ -407,6 +448,78 @@ testing <- ggdraw(ressus) +
 
 
 save_plot(plot = testing, "/Users/PaddockK/Documents/Projects/Cover_crop/cover_crop_git/Figs/230205_res_sus_weight_combined2.pdf", base_width = 10, base_height = 15)
+
+ressus2 <- plot_grid(weight.plot.bar.sus2, weight.plot.bar.res, ncol = 1, align = "v", labels = c("a", "b"), label_size = 20)
+
+testing2 <- ggdraw(ressus2) +
+  geom_text( #Main effect stars for susceptible
+    data = data.frame(x = 0.468, y = 0.95, label = "NS"),
+    aes(x, y, label = label),
+    size = 16/.pt,
+    inherit.aes = FALSE
+  ) +
+   draw_line( # main effect line for susceptible
+    x = c(0.325, 0.621),
+    y = c(.94, 0.94),
+    color = "black", size = 1
+  ) +
+  geom_text( #Main effect stars for resistant
+    data = data.frame(x = 0.468, y = 0.455, label = "*"),
+    aes(x, y, label = label),
+    size = 20/.pt,
+    inherit.aes = FALSE
+  ) +
+    draw_line( #main effect line for resistant
+    x = c(0.325, 0.621),
+    y = c(.45, 0.45),
+    color = "black", size = 1
+  ) +
+   geom_text( #corn line effect stars for susceptible CC
+    data = data.frame(x = 0.33, y = 0.905, label = "***"),
+    aes(x, y, label = label),
+    size = 20/.pt,
+    inherit.aes = FALSE
+  ) +
+  draw_line( #corn line line for susceptible CC
+    x = c(0.28, 0.38),
+    y = c(.90, 0.90),
+    color = "black", size = 1
+  ) + 
+   geom_text( #corn line effect stars for susceptible TR
+    data = data.frame(x = 0.61, y = 0.86, label = "***"),
+    aes(x, y, label = label),
+    size = 20/.pt,
+    inherit.aes = FALSE
+  ) +
+  draw_line( #corn line line for susceptible TR
+    x = c(0.56, 0.66),
+    y = c(.855, 0.855),
+    color = "black", size = 1
+  ) +
+  geom_text( #corn line effect stars for resistant CC
+    data = data.frame(x = 0.33, y = 0.385, label = "*"),
+    aes(x, y, label = label),
+    size = 20/.pt,
+    inherit.aes = FALSE
+  ) +
+  draw_line( #corn line line for resistant CC
+    x = c(0.28, 0.38),
+    y = c(.38, 0.38),
+    color = "black", size = 1
+  ) +
+   geom_text( #corn line effect stars for resistant TR
+    data = data.frame(x = 0.61, y = 0.43, label = "NS"),
+    aes(x, y, label = label),
+    size = 16/.pt,
+    inherit.aes = FALSE
+  ) +
+  draw_line( #corn line line for resistant TR
+    x = c(0.56, 0.66),
+    y = c(.42, 0.42),
+    color = "black", size = 1
+  )
+
+save_plot(plot = testing2, "/Users/PaddockK/Documents/Projects/Cover_crop/cover_crop_git/Figs/230215_res_sus_weight_combined_DLF.pdf", base_width = 10, base_height = 15)
 ```
 
 
